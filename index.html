@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Hoang Auto Publisher — tiện ích cá nhân chạy local trên MacBook để chuẩn bị và đăng video lên YouTube Shorts và Facebook Page, với quyền truy cập do chủ tài khoản kiểm soát.">
+  <meta name="theme-color" content="#13213a">
+  <title>Hoang Auto Publisher — Local-first Video Publishing</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="topbar"><div class="container topbar-inner">
+    <a class="brand" href="./index.html" aria-label="Hoang Auto Publisher — Trang chủ"><span class="brand-symbol" aria-hidden="true">H</span><span class="wordmark">Hoang Auto Publisher</span></a>
+    <nav class="nav" aria-label="Điều hướng chính"><a href="./index.html" aria-current="page">Trang chủ</a><a href="./privacy.html">Quyền riêng tư</a><a href="./terms.html">Điều khoản</a></nav>
+  </div></header>
+
+  <!-- OWNER_CONFIRM: Remove the review banner only after completing every item in OWNER_CHECKLIST.md. -->
+  <div class="review-banner"><div class="container"><strong>BẢN NHÁP — CẦN CHỦ SỞ HỮU XÁC NHẬN:</strong> email liên hệ, mô tả xử lý dữ liệu, chính sách lưu trữ và ngày hiệu lực trước khi công khai hoặc gửi Google xác minh OAuth.</div></div>
+
+  <main>
+    <section class="hero"><div class="container">
+      <div>
+        <span class="eyebrow">LOCAL-FIRST • CREATOR WORKFLOW</span>
+        <h1>Đăng video nhất quán.<br>Kiểm soát trong tay bạn.</h1>
+        <p>Hoang Auto Publisher là tiện ích cá nhân chạy trên MacBook, hỗ trợ chuẩn bị và gửi video từ máy tính lên YouTube Shorts và Facebook Page bằng quyền truy cập do chủ tài khoản cấp.</p>
+        <p lang="en">A personal, MacBook-based utility for preparing and publishing locally stored videos to YouTube Shorts and Facebook Pages with account-owner authorization.</p>
+        <div class="actions"><a class="button" href="./privacy.html">Chính sách quyền riêng tư ↗</a><a class="button button-secondary" href="#how-it-works">Cách hoạt động ↓</a></div>
+      </div>
+      <div class="hero-visual" aria-hidden="true"><div class="hero-glow"></div><div class="flow-graphic">
+        <div class="video-preview"><span class="play">▶</span></div>
+        <div class="flow-rule"></div><div class="flow-chip"><span>MacBook · Local files</span><span>✓ Ready</span></div>
+        <div class="flow-rule"></div><div class="flow-chip"><span>YouTube Shorts</span><span>OAuth</span></div>
+        <div class="flow-rule"></div><div class="flow-chip"><span>Facebook Page</span><span>Page API</span></div>
+      </div></div>
+    </div></section>
+
+    <section class="section" id="how-it-works"><div class="container">
+      <span class="eyebrow">01 / Workflow</span><h2>Ba bước, một luồng đăng nội dung</h2>
+      <p class="section-intro">Ứng dụng phục vụ người vận hành đã có sẵn video trên máy. Đây là trang giới thiệu và thông tin chính sách; website này không có chức năng đăng nhập hoặc tải video lên.</p>
+      <div class="cards">
+        <article class="card"><span class="number">01</span><h3>Chọn video trong máy</h3><p>Workflow đọc các tệp video trong thư mục được chủ sở hữu chỉ định trên MacBook.</p><span class="secondary-language" lang="en">The owner selects a local folder containing videos.</span></article>
+        <article class="card"><span class="number">02</span><h3>Chuẩn bị nội dung</h3><p>Ứng dụng kiểm tra định dạng, quản lý lịch đăng và chuẩn bị phần mô tả. Các dịch vụ AI tùy chọn phải được khai báo riêng trong chính sách dữ liệu.</p><span class="secondary-language" lang="en">Video checks, scheduling and post metadata preparation take place in the local workflow.</span></article>
+        <article class="card"><span class="number">03</span><h3>Gửi đến nền tảng</h3><p>Video được gửi đến YouTube hoặc Facebook bằng quyền được cấp cho tài khoản tương ứng. Kết quả có thể cần thời gian xử lý từ nền tảng.</p><span class="secondary-language" lang="en">Authorized platform APIs receive the upload; visibility depends on platform processing and policies.</span></article>
+      </div>
+    </div></section>
+
+    <section class="section" style="padding-top:0"><div class="container feature-grid">
+      <div class="feature-panel"><span class="tag">Google OAuth</span><h2 style="margin-top:15px">Quyền YouTube được yêu cầu</h2><p>Ứng dụng yêu cầu scope <code class="mono">https://www.googleapis.com/auth/youtube.upload</code> để đăng video lên kênh mà người dùng chọn và cho phép.</p><p class="muted" lang="en">The requested Google scope is limited to YouTube video upload. The desktop authorization flow stores a reusable credential locally on the owner's device.</p><a href="./privacy.html">Xem cách dữ liệu được xử lý ↗</a></div>
+      <div class="feature-panel"><span class="tag">Page publishing</span><h2 style="margin-top:15px">Facebook Page</h2><p>Ứng dụng sử dụng quyền truy cập Page do người quản lý cấp để gửi video lên Facebook Page tương ứng. Điều này không cho phép chương trình tự ý đăng lên Facebook cá nhân.</p><p class="muted" lang="en">Facebook Page posting uses authorization provided by a person with relevant Page management rights.</p><a href="./terms.html">Xem trách nhiệm sử dụng ↗</a></div>
+    </div></section>
+
+    <section class="section" style="padding-top:0"><div class="container"><div class="summary"><span class="summary-mark" aria-hidden="true">ⓘ</span><div><strong>Ứng dụng desktop, không phải website upload video.</strong><p style="margin:3px 0 0">Trang này công khai thông tin về mục đích sử dụng và quyền dữ liệu; các thao tác đăng video được thực hiện bởi chương trình chạy trên MacBook. <span lang="en">This site is informational; publishing occurs in the local desktop workflow.</span></p></div></div></div></section>
+  </main>
+
+  <footer class="footer"><div class="container"><div><strong>Hoang Auto Publisher</strong><div class="small">Local-first personal publishing utility</div><div class="small">Operator contact: <span class="mono">QUANGHOANG2303@GMAIL.COM</span> · <strong>OWNER_CONFIRM</strong></div></div><div class="footer-links"><a href="./index.html">Trang chủ</a><a href="./privacy.html">Privacy Policy</a><a href="./terms.html">Terms of Service</a></div></div></footer>
+</body>
+</html>

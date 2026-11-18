@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Chính sách quyền riêng tư của Hoang Auto Publisher: quyền YouTube OAuth, dữ liệu video, lưu token trên MacBook, các bên nhận dữ liệu và cách thu hồi quyền.">
+  <meta name="theme-color" content="#13213a"><title>Privacy Policy — Hoang Auto Publisher</title><link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="topbar"><div class="container topbar-inner"><a class="brand" href="./index.html"><span class="brand-symbol" aria-hidden="true">H</span><span class="wordmark">Hoang Auto Publisher</span></a><nav class="nav" aria-label="Điều hướng chính"><a href="./index.html">Trang chủ</a><a href="./privacy.html" aria-current="page">Quyền riêng tư</a><a href="./terms.html">Điều khoản</a></nav></div></header>
+  <!-- OWNER_CONFIRM: Complete owner details and actual processing disclosures before publication. -->
+  <div class="review-banner"><div class="container"><strong>DRAFT / BẢN NHÁP:</strong> Có các thông tin <code>OWNER_CONFIRM</code> cần chủ sở hữu xác minh và thay thế trước khi sử dụng làm chính sách OAuth công khai.</div></div>
+  <main>
+    <div class="page-heading"><div class="container"><span class="eyebrow">Privacy & Data Use</span><h1>Chính sách quyền riêng tư<br><span class="muted" lang="en">Privacy Policy</span></h1><p>Chúng tôi giải thích dữ liệu nào được xử lý, vì sao cần quyền YouTube, nơi lưu thông tin xác thực và cách người dùng kiểm soát quyền truy cập.</p><p class="small">Ngày hiệu lực / Effective date: <strong>2026-11-18</strong></p></div></div>
+    <div class="container policy-layout">
+      <aside class="toc" aria-label="Mục lục"><strong>Mục lục / Contents</strong><a href="#operator">1. Đơn vị vận hành</a><a href="#scope">2. Phạm vi sử dụng</a><a href="#google">3. Google OAuth</a><a href="#local">4. Dữ liệu lưu local</a><a href="#sharing">5. Chia sẻ dữ liệu</a><a href="#retention">6. Lưu trữ và bảo mật</a><a href="#rights">7. Quyền và thu hồi</a><a href="#website">8. Website</a><a href="#changes">9. Liên hệ và cập nhật</a></aside>
+      <article class="document">
+        <section id="operator"><h2>1. Ai vận hành ứng dụng / Who operates the app?</h2>
+          <p><strong>VI:</strong> Hoang Auto Publisher là tiện ích cá nhân phục vụ workflow đăng video do chủ tài khoản điều khiển trên MacBook. Chủ sở hữu chịu trách nhiệm về việc quản lý quyền truy cập và nội dung đăng tải.</p>
+          <p lang="en"><strong>EN:</strong> Hoang Auto Publisher is a personal desktop utility used by its operator to manage video publishing from a MacBook. The operator is responsible for authorized accounts and published content.</p>
+          <p><strong>Chủ sở hữu / Operator:</strong> TRAN QUANG HOANG. <strong>Email liên hệ / Contact:</strong> <a href="mailto:QUANGHOANG2303@GMAIL.COM">QUANGHOANG2303@GMAIL.COM</a>.</p>
+        </section>
+        <section id="scope"><h2>2. Phạm vi sử dụng / What the app does</h2>
+          <p><strong>VI:</strong> Theo thiết kế hiện tại do chủ sở hữu mô tả, chương trình chạy trên MacBook, đọc video trong thư mục local được chọn, chuẩn bị thông tin đăng và gửi video đến YouTube Shorts hoặc Facebook Page theo lịch được cấu hình.</p>
+          <p lang="en"><strong>EN:</strong> As described by the operator, the program runs locally on a MacBook, processes videos from a selected local folder, prepares post metadata, and submits uploads to authorized YouTube channels or Facebook Pages on a configured schedule.</p>
+          <p>Workflow có thể ghi thông tin vận hành (ví dụ: trạng thái đăng hoặc mã bài đăng) trong máy. <span lang="en">The workflow may keep local operational records, such as posting status and platform post identifiers.</span></p>
+          <div class="owner-confirm"><strong>OWNER_CONFIRM:</strong> Xác nhận workflow đang chạy đúng như mô tả, bao gồm dữ liệu log/SQLite, việc phân tích khung hình hoặc phụ đề, và các thư mục được truy cập.</div>
+        </section>
+        <section id="google"><h2>3. Google OAuth và dữ liệu YouTube / Google OAuth and YouTube data</h2>
+          <p><strong>VI:</strong> Ứng dụng dùng Google OAuth 2.0 để chủ tài khoản tự cấp quyền. Scope được yêu cầu là:</p>
+          <p class="mono"><code>https://www.googleapis.com/auth/youtube.upload</code></p>
+          <p>Scope này phục vụ mục đích tải video lên kênh YouTube được chủ tài khoản chọn và cấp quyền. Trong quá trình hoạt động, chương trình sử dụng thông tin xác thực OAuth để gọi YouTube Data API và có thể làm mới access token khi Google cho phép.</p>
+          <p lang="en"><strong>EN:</strong> The app requests Google OAuth 2.0 scope <code>youtube.upload</code> solely to upload videos to the YouTube channel authorized by the account owner. The local desktop workflow uses OAuth credentials to call the YouTube Data API and may refresh access tokens when permitted.</p>
+          <p>Đây không phải quyền đọc Gmail, Google Drive, danh bạ hoặc mật khẩu Google. <span lang="en">This requested scope does not itself grant Gmail, Drive, contacts or password access.</span></p>
+          <div class="owner-confirm"><strong>OWNER_CONFIRM:</strong> Nếu bản triển khai thực tế yêu cầu thêm Google scopes hoặc dùng thêm YouTube APIs để đọc dữ liệu kênh, phải cập nhật phần này trước khi công khai.</div>
+        </section>
+        <section id="local"><h2>4. Dữ liệu trên MacBook / Locally stored information</h2>
+          <p><strong>VI:</strong> Theo mô tả hiện tại, credential OAuth của YouTube (bao gồm token phục vụ làm mới phiên) được lưu trong file local trên MacBook. Video nguồn cũng được lấy từ ổ đĩa local. Ứng dụng có thể lưu thông tin cấu hình và dữ liệu trạng thái đăng tại máy.</p>
+          <p lang="en"><strong>EN:</strong> Under the current described setup, YouTube OAuth credentials (including refresh-related credentials) are stored in files on the operator's MacBook. Source videos are read from local storage, and workflow configuration or publishing records may also be stored locally.</p>
+          <p><strong>VI:</strong> Để gửi video, chương trình truyền nội dung và thông tin bài đăng đến API của YouTube hoặc Facebook đã được cấp quyền. Vì vậy “lưu local” không có nghĩa rằng video không rời khỏi MacBook.</p>
+          <p lang="en"><strong>EN:</strong> Publishing necessarily transmits video files and post metadata to the authorized YouTube or Facebook service. Local credential storage does not mean uploaded video content never leaves the device.</p>
+          <div class="owner-confirm"><strong>OWNER_CONFIRM:</strong> Xác minh vị trí lưu token (ví dụ <code>token.json</code>), Facebook credentials, logs, SQLite và quyền truy cập các file này. Không khẳng định dữ liệu đã được mã hóa ở trạng thái lưu trữ nếu chưa kiểm tra.</div>
+        </section>
+        <section id="sharing"><h2>5. Bên nhận dữ liệu / Third-party services</h2>
+          <p><strong>VI:</strong> Khi người vận hành bật tính năng đăng video, dữ liệu liên quan được gửi đến:</p>
+          <ul><li><strong>Google / YouTube:</strong> Video và thông tin đăng để upload lên kênh đã ủy quyền.</li><li><strong>Meta / Facebook:</strong> Video và thông tin đăng để xuất bản lên Facebook Page đã ủy quyền.</li></ul>
+          <p lang="en"><strong>EN:</strong> Authorized publishing transfers video content and related post details to Google/YouTube and Meta/Facebook, where they are subject to the respective platforms' terms and privacy policies.</p>
+          <p>Trong bộ website tĩnh được cung cấp này không có mã phân tích lượt truy cập, form thu thập thông tin, quảng cáo hoặc tập lệnh của bên thứ ba. <span lang="en">The provided static site itself includes no analytics tracker, user-data form, advertising script, or third-party JavaScript.</span></p>
+          <div class="owner-confirm"><strong>OWNER_CONFIRM — RẤT QUAN TRỌNG:</strong> Workflow trước đây có khả năng cấu hình AI tạo caption bằng API, hoặc Telegram để thông báo. Xác nhận các dịch vụ đó có đang bật hay không. Nếu bật, hãy bổ sung nhà cung cấp, loại dữ liệu gửi đi (ví dụ khung hình, tiêu đề, log) và mục đích sử dụng trước khi xuất bản chính sách. Đồng thời xác nhận có hay không việc bán/chia sẻ dữ liệu cho mục đích quảng cáo.</div>
+        </section>
+        <section id="retention"><h2>6. Lưu trữ và bảo mật / Retention and security</h2>
+          <p><strong>VI:</strong> Việc lưu các file local chịu sự quản lý của chủ MacBook. Các nền tảng YouTube và Facebook áp dụng thời hạn lưu trữ, chế độ hiển thị và chính sách riêng đối với nội dung đã tải lên.</p>
+          <p lang="en"><strong>EN:</strong> Locally saved files are managed on the operator's MacBook. Google/YouTube and Meta/Facebook independently govern retention, visibility and processing of content uploaded to their services.</p>
+          <div class="owner-confirm"><strong>OWNER_CONFIRM:</strong> Chưa có bằng chứng được cung cấp về lịch xóa token, video nguồn, log, bản sao lưu hoặc cơ chế mã hóa (chẳng hạn FileVault). Hãy bổ sung thời gian lưu thực tế và biện pháp bảo vệ đã bật. Không sử dụng những lời cam kết như “mã hóa tuyệt đối” hoặc “xóa ngay lập tức” nếu không được triển khai.</div>
+        </section>
+        <section id="rights"><h2>7. Kiểm soát, thu hồi và xóa / Access, revocation and deletion</h2>
+          <p><strong>VI:</strong> Chủ tài khoản có thể thu hồi quyền Google cấp cho ứng dụng tại <a href="https://myaccount.google.com/connections">Google Account → Third-party connections</a> và quản lý các quyền liên quan đến Facebook tại phần cài đặt tài khoản Meta/Facebook. Việc thu hồi quyền có thể khiến workflow không thể tiếp tục đăng video.</p>
+          <p lang="en"><strong>EN:</strong> The account owner may revoke granted Google access in Google Account third-party connection settings and manage relevant Facebook permissions through Meta/Facebook account settings. Revocation may stop further automated publishing.</p>
+          <p>Việc thu hồi OAuth không tự động xóa video đã đăng lên nền tảng hoặc bản sao local. <span lang="en">Revoking OAuth access does not automatically delete already published platform content or local copies.</span></p>
+          <div class="owner-confirm"><strong>OWNER_CONFIRM:</strong> Cung cấp email thật để tiếp nhận yêu cầu truy cập/xóa dữ liệu và mô tả quy trình xử lý có thể thực hiện được. Ví dụ: kiểm tra và xóa file cấu hình/token/log local khi được yêu cầu; việc xóa bài đã đăng thực hiện riêng trên nền tảng.</div>
+        </section>
+        <section id="website"><h2>8. Website giới thiệu / Public informational website</h2>
+          <p><strong>VI:</strong> Website này là trang HTML tĩnh phục vụ giới thiệu ứng dụng và công bố chính sách; không cung cấp cơ chế đăng nhập Google hoặc form upload video. Không có cookie phân tích/tiếp thị do mã nguồn website này tự thiết lập. Nhà cung cấp hosting (ví dụ GitHub Pages) có thể xử lý dữ liệu truy cập như địa chỉ IP theo chính sách riêng của họ.</p>
+          <p lang="en"><strong>EN:</strong> This HTML-only informational site does not implement Google sign-in or video uploads, and the supplied site code sets no analytics or marketing cookies. Its hosting provider (for example GitHub Pages) may process connection data such as IP addresses under its own privacy terms.</p>
+        </section>
+        <section id="changes"><h2>9. Thay đổi và liên hệ / Updates and contact</h2>
+          <p><strong>VI:</strong> Khi tính năng, quyền truy cập, nhà cung cấp dữ liệu hoặc thời hạn lưu trữ thay đổi, nội dung chính sách cần được cập nhật và ghi ngày hiệu lực mới.</p>
+          <p lang="en"><strong>EN:</strong> This policy should be updated whenever functionality, OAuth permissions, data recipients or retention practices change, with an updated effective date.</p>
+          <div class="owner-confirm"><strong>OWNER_CONFIRM:</strong> Chủ sở hữu: <span class="mono">TRAN QUANG HOANG</span><br>Email: <span class="mono">QUANGHOANG2303@GMAIL.COM</span><br>Ngày hiệu lực / Effective date: <span class="mono">2026-11-18</span></div>
+        </section>
+      </article>
+    </div>
+  </main>
+  <footer class="footer"><div class="container"><div><strong>Hoang Auto Publisher</strong><div class="small">Public disclosure for a local desktop workflow</div><div class="small">Contact: <span class="mono">QUANGHOANG2303@GMAIL.COM</span> · OWNER_CONFIRM</div></div><div class="footer-links"><a href="./index.html">Home</a><a href="./privacy.html">Privacy Policy</a><a href="./terms.html">Terms of Service</a></div></div></footer>
+</body>
+</html>
