@@ -1,0 +1,12 @@
+{
+  "notes": "EXAMPLE ONLY. Record and customize the selectors/coordinates for your TikTok version and Android screen before enabling ADB live posts. No final post step is supplied by default.",
+  "steps": [
+    {"action": "sleep", "seconds": 3},
+    {"action": "tap_text", "text": "Upload"},
+    {"action": "tap_xy", "x": 100, "y": 300, "note": "CHANGE: select newest imported video"},
+    {"action": "tap_text", "text": "Next"},
+    {"action": "tap_text", "text": "Next"},
+    {"action": "set_text", "selector": {"className": "android.widget.EditText", "instance": 0}, "value": "{caption}"},
+    {"action": "assert_text", "text": "Post"}
+  ]
+}

@@ -1,0 +1,462 @@
+import json
+import os
+from datetime import datetime
+from pathlib import Path
+import sqlite3
+import sys
+import tempfile
+import types
+import unittest
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import publisher
+import backends
+from backends import PreflightError
+from tiktok_adb import validate_macro
+
+
+class PublisherTests(unittest.TestCase):
+    def test_due_window_and_missed_slot(self):
+        with patch.dict(os.environ, {"POST_TIMES": "09:00,12:00,18:00", "MISSED_SLOT_GRACE_MINUTES": "25"}):
+            zone = ZoneInfo("Asia/Ho_Chi_Minh")
+            self.assertEqual(publisher.due(datetime(2026, 11, 18, 9, 10, tzinfo=zone)), ["09:00"])
+            self.assertEqual(publisher.due(datetime(2026, 11, 18, 9, 26, tzinfo=zone)), [])
+            self.assertEqual(publisher.due(datetime(2026, 11, 18, 17, 30, tzinfo=zone)), [])
+
+    def test_invalid_slots_and_platforms(self):
+        with patch.dict(os.environ, {"POST_TIMES": "09:00,09:00"}):
+            with self.assertRaises(ValueError):
+                publisher.slots()
+        with patch.dict(os.environ, {"PLATFORMS": "youtube,tiktok,tiktok"}):
+            with self.assertRaises(ValueError):
+                publisher.platforms()
+        with patch.dict(os.environ, {"YT_LONG_POST_TIMES": "19:00,19:00"}):
+            with self.assertRaises(ValueError):
+                publisher.slots("long")
+        with patch.dict(os.environ, {"YT_LONG_POST_DAYS": "mon,unknown"}):
+            with self.assertRaises(ValueError):
+                publisher.long_post_days()
+
+    def test_dispatch_deduplicates_video_and_slot(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            video = root / "sample.mp4"
+            video.write_bytes(b"example-test-media")
+            connection = sqlite3.connect(":memory:")
+            connection.row_factory = sqlite3.Row
+            connection.executescript("""
+              CREATE TABLE videos(id INTEGER PRIMARY KEY,fingerprint TEXT UNIQUE,path TEXT,title_hint TEXT,created_at TEXT,
+                kind TEXT DEFAULT 'short',stale INTEGER NOT NULL DEFAULT 0);
+              CREATE TABLE dispatches(id INTEGER PRIMARY KEY,slot_key TEXT UNIQUE,video_id INTEGER UNIQUE,day TEXT,caption_json TEXT,metadata_json TEXT,created_at TEXT);
+              CREATE TABLE posts(dispatch_id INTEGER,platform TEXT,status TEXT,remote_id TEXT,error TEXT,updated_at TEXT,PRIMARY KEY(dispatch_id,platform));
+            """)
+            connection.execute("INSERT INTO videos(fingerprint,path,title_hint,created_at) VALUES (?,?,?,?)",
+                               (publisher.file_fingerprint(video), str(video), "sample", "now"))
+            fake_caption = {"title": "x", "facebook": "x", "youtube": "x", "tiktok": "x"}
+            fixed = datetime(2026, 11, 18, 9, 0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh"))
+            with patch.object(publisher, "validate", return_value={"duration_seconds": 20}), \
+                    patch.object(publisher, "make_caption", return_value=fake_caption), \
+                    patch.dict(os.environ, {"MAX_DAILY_POSTS": "5", "PLATFORMS": "facebook,youtube"}):
+                publisher.create_dispatch(connection, "2026-11-18-09:00", fixed)
+                publisher.create_dispatch(connection, "2026-11-18-09:00", fixed)
+                publisher.create_dispatch(connection, "2026-11-18-12:00", fixed)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM dispatches").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0], 2)
+            connection.close()
+
+    def test_long_form_validation_avoids_accidental_shorts(self):
+        sample = Path("episode.mp4")
+        with patch.object(publisher, "probe", return_value={"duration_seconds": 600, "width": 1920, "height": 1080}):
+            self.assertEqual(publisher.validate(sample, "long")["duration_seconds"], 600)
+            with self.assertRaises(ValueError):
+                publisher.validate(sample, "short")
+        with patch.object(publisher, "probe", return_value={"duration_seconds": 120, "width": 1080, "height": 1920}):
+            with self.assertRaisesRegex(ValueError, "are Shorts"):
+                publisher.validate(sample, "long")
+        with patch.object(publisher, "probe", return_value={"duration_seconds": 181, "width": 1080, "height": 1920}):
+            publisher.validate(sample, "long")
+        with patch.object(publisher, "probe", return_value={"duration_seconds": 120, "width": 1920, "height": 1080}):
+            publisher.validate(sample, "long")
+
+    def test_long_schedule_independent_of_shorts(self):
+        zone = ZoneInfo("Asia/Ho_Chi_Minh")
+        monday = datetime(2026, 11, 23, 19, 5, tzinfo=zone)
+        tuesday = datetime(2026, 11, 24, 19, 5, tzinfo=zone)
+        with patch.dict(os.environ, {"POST_TIMES": "09:00", "YT_LONG_POST_TIMES": "19:00",
+                                     "YT_LONG_POST_DAYS": "mon,wed,fri"}):
+            self.assertEqual(publisher.due(monday, "long"), ["19:00"])
+            self.assertEqual(publisher.due(tuesday, "long"), [])
+            self.assertEqual(publisher.due(monday, "short"), [])
+            self.assertEqual(publisher.platforms("long"), ["youtube"])
+
+    def test_database_migrates_existing_short_jobs_without_erasure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db_file = Path(folder) / "old.sqlite3"
+            with sqlite3.connect(db_file) as connection:
+                connection.executescript("""
+                  CREATE TABLE videos(id INTEGER PRIMARY KEY,fingerprint TEXT NOT NULL UNIQUE,path TEXT NOT NULL,
+                    title_hint TEXT NOT NULL,created_at TEXT NOT NULL);
+                  CREATE TABLE dispatches(id INTEGER PRIMARY KEY,slot_key TEXT NOT NULL UNIQUE,
+                    video_id INTEGER NOT NULL UNIQUE,day TEXT NOT NULL,caption_json TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,created_at TEXT NOT NULL);
+                  CREATE TABLE posts(dispatch_id INTEGER NOT NULL,platform TEXT NOT NULL,status TEXT NOT NULL,
+                    remote_id TEXT,error TEXT,updated_at TEXT NOT NULL,
+                    PRIMARY KEY(dispatch_id,platform));
+                  INSERT INTO videos(fingerprint,path,title_hint,created_at) VALUES ('oldhash','old.mp4','old','now');
+                """)
+            with patch.object(publisher, "DATABASE", db_file), publisher.db() as connection:
+                row = connection.execute("SELECT kind,fingerprint FROM videos").fetchone()
+                self.assertEqual(tuple(row), ("short", "oldhash"))
+                self.assertIn("kind", [col[1] for col in connection.execute("PRAGMA table_info(videos)")])
+                self.assertIn("mtime_ns", [col[1] for col in connection.execute("PRAGMA table_info(videos)")])
+
+    def test_rescan_skips_unchanged_large_file_and_requeues_replacement(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            shorts = root / "shorts"
+            shorts.mkdir()
+            video = shorts / "sample.mp4"
+            video.write_bytes(b"content-v1")
+            with patch.object(publisher, "DATABASE", root / "test.sqlite3"), \
+                 patch.object(publisher, "validate", return_value={"duration_seconds": 10}), \
+                 patch.dict(os.environ, {"VIDEO_DIR": str(shorts), "YT_LONG_VIDEO_DIR": "",
+                                      "MIN_FILE_AGE_SECONDS": "0"}):
+                with publisher.db() as connection:
+                    self.assertEqual(publisher.scan(connection), 1)
+                    with patch.object(publisher, "file_fingerprint", side_effect=AssertionError("should not rehash")):
+                        self.assertEqual(publisher.scan(connection), 0)
+                    video.write_bytes(b"content-v2-with-new-length")
+                    self.assertEqual(publisher.scan(connection), 1)
+                    rows = connection.execute("SELECT stale,fingerprint FROM videos ORDER BY id").fetchall()
+                    self.assertEqual([row["stale"] for row in rows], [1, 0])
+
+    def test_queue_routing_and_caps_are_isolated(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            shorts, longs = root / "shorts", root / "youtube_long"
+            shorts.mkdir()
+            longs.mkdir()
+            (shorts / "short1.mp4").write_bytes(b"short-unique")
+            (longs / "episode.mp4").write_bytes(b"long-unique")
+            test_db = root / "queue.sqlite3"
+            fixed = datetime(2026, 11, 23, 19, 0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh"))
+            def fake_validate(path, kind="short"):
+                return {"duration_seconds": 600 if kind == "long" else 20, "width": 1920, "height": 1080}
+            with patch.object(publisher, "DATABASE", test_db), \
+                 patch.object(publisher, "validate", side_effect=fake_validate), \
+                 patch.object(publisher, "make_caption", return_value={"title": "x", "youtube": "x", "facebook": "x", "tiktok": "x"}), \
+                 patch.dict(os.environ, {"VIDEO_DIR": str(shorts), "YT_LONG_VIDEO_DIR": str(longs),
+                                      "MIN_FILE_AGE_SECONDS": "0", "MAX_DAILY_POSTS": "1",
+                                      "YT_LONG_MAX_DAILY_POSTS": "1", "PLATFORMS": "facebook,youtube"}):
+                with publisher.db() as connection:
+                    self.assertEqual(publisher.scan(connection), 2)
+                    publisher.create_dispatch(connection, "2026-11-23-19:00", fixed, "short")
+                    publisher.create_dispatch(connection, "yt-long:2026-11-23-19:00", fixed, "long")
+                    publisher.create_dispatch(connection, "yt-long:2026-11-23-19:05", fixed, "long")
+                    posts = connection.execute("""SELECT v.kind,p.platform FROM posts p
+                        JOIN dispatches d ON d.id=p.dispatch_id
+                        JOIN videos v ON v.id=d.video_id ORDER BY v.kind,p.platform""").fetchall()
+                    self.assertEqual([tuple(row) for row in posts],
+                                     [("long", "youtube"), ("short", "facebook"), ("short", "youtube")])
+                    self.assertEqual(connection.execute("SELECT COUNT(*) FROM dispatches").fetchone()[0], 2)
+
+    def test_long_caption_no_shorts_tag_and_manual_metadata(self):
+        with tempfile.TemporaryDirectory() as folder:
+            video = Path(folder) / "episode_01.mp4"
+            video.write_bytes(b"placeholder")
+            with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+                caption = publisher.make_caption(video, {"duration_seconds": 600}, "long")
+                self.assertEqual(caption["title"], "episode 01")
+                self.assertNotIn("#Shorts", caption["youtube"])
+                video.with_suffix(".json").write_text(json.dumps({
+                    "youtube_title": "Tập 1 — Học dẫn dắt AI",
+                    "youtube_description": "Nội dung series Generation", "youtube_made_for_kids": True
+                }), encoding="utf-8")
+                caption = publisher.make_caption(video, {"duration_seconds": 600}, "long")
+                self.assertEqual(caption["title"], "Tập 1 — Học dẫn dắt AI")
+                self.assertEqual(caption["youtube"], "Nội dung series Generation")
+
+    def test_youtube_long_upload_uses_separate_privacy_and_kids_metadata(self):
+        captured = {}
+
+        class FakeUpload:
+            def __init__(self, path, mimetype, resumable, chunksize):
+                captured["path"] = path
+                captured["resumable"] = resumable
+
+        class FakeRequest:
+            def next_chunk(self, num_retries):
+                captured["num_retries"] = num_retries
+                return None, {"id": "remote-episode-01"}
+
+        class FakeYouTube:
+            def videos(self):
+                return self
+
+            def insert(self, part, body, media_body):
+                captured["body"] = body
+                return FakeRequest()
+
+        http_module = types.ModuleType("googleapiclient.http")
+        http_module.MediaFileUpload = FakeUpload
+        package_module = types.ModuleType("googleapiclient")
+        package_module.http = http_module
+        with patch.dict(sys.modules, {"googleapiclient": package_module, "googleapiclient.http": http_module}), \
+             patch.object(backends, "youtube_client", return_value=FakeYouTube()), \
+             patch.dict(os.environ, {"YT_PRIVACY": "public", "YT_LONG_PRIVACY": "private",
+                                      "YT_LONG_CATEGORY_ID": "27", "YT_MADE_FOR_KIDS": "false"}):
+            result = backends.youtube_publish(Path("episode.mp4"),
+                    {"title": "Episode 01", "youtube": "Nội dung dài"}, kind="long",
+                    metadata={"youtube_made_for_kids": True})
+        self.assertEqual(result, ("submitted", "remote-episode-01"))
+        self.assertEqual(captured["body"]["status"], {"privacyStatus": "private", "selfDeclaredMadeForKids": True})
+        self.assertEqual(captured["body"]["snippet"]["categoryId"], "27")
+        self.assertTrue(captured["resumable"])
+        self.assertEqual(captured["num_retries"], 3)
+
+    def test_manual_long_publish_does_not_flush_queued_short_posts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            video_long = root / "long.mp4"
+            video_short = root / "short.mp4"
+            video_long.write_bytes(b"long")
+            video_short.write_bytes(b"short")
+            with patch.object(publisher, "DATABASE", root / "test.sqlite3"):
+                with publisher.db() as connection:
+                    for kind, video in (("long", video_long), ("short", video_short)):
+                        connection.execute("INSERT INTO videos(fingerprint,path,title_hint,created_at,kind) "
+                                           "VALUES (?,?,?,?,?)", (publisher.file_fingerprint(video), str(video), kind, "now", kind))
+                        video_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+                        connection.execute("INSERT INTO dispatches(slot_key,video_id,day,caption_json,metadata_json,created_at) "
+                                           "VALUES (?,?,?,?,?,?)", (kind, video_id, "2026-11-23",
+                                           json.dumps({"title": kind, "youtube": kind, "facebook": kind}),
+                                           json.dumps({"duration_seconds": 200}), "now"))
+                        dispatch_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+                        connection.execute("INSERT INTO posts(dispatch_id,platform,status,updated_at) VALUES (?,?,?,?)",
+                                           (dispatch_id, "youtube", "queued", "now"))
+                    connection.commit()
+                    with patch.object(backends, "youtube_client"), \
+                         patch.object(backends, "youtube_publish", return_value=("submitted", "remote1")) as mock_upload, \
+                         patch.object(publisher, "send_notice"):
+                        publisher.publish_pending(connection, "long")
+                    mock_upload.assert_called_once()
+                    self.assertEqual(mock_upload.call_args.kwargs["kind"], "long")
+                    rows = connection.execute("""SELECT v.kind,p.status FROM posts p
+                         JOIN dispatches d ON d.id=p.dispatch_id JOIN videos v ON v.id=d.video_id
+                         ORDER BY v.kind""").fetchall()
+                    self.assertEqual([tuple(row) for row in rows],
+                                     [("long", "submitted"), ("short", "queued")])
+
+    def test_adb_macro_fails_closed_without_approval(self):
+        with patch.dict(os.environ, {"ADB_MACRO_APPROVED": "false"}):
+            with self.assertRaises(PreflightError):
+                validate_macro()
+
+    def test_tiktok_sidecar_loading(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            file = root / "example.mp4"
+            file.write_bytes(b"fake")
+            (root / "example.json").write_text(json.dumps({"tiktok_consent": True}))
+            self.assertEqual(publisher.read_metadata(file), {"tiktok_consent": True})
+
+    def test_tiktok_ok_response_with_extra_fields(self):
+        class Response:
+            def raise_for_status(self):
+                return None
+            def json(self):
+                return {"data": {"publish_id": "abc"}, "error": {"code": "ok", "message": ""}}
+        self.assertEqual(backends.checked(Response())["data"]["publish_id"], "abc")
+
+    def test_stale_inflight_is_never_retried_automatically(self):
+        with sqlite3.connect(":memory:") as con:
+            con.execute("CREATE TABLE posts(status TEXT,error TEXT,updated_at TEXT)")
+            con.execute("INSERT INTO posts(status) VALUES ('inflight')")
+            publisher.quarantine_interrupted_uploads(con)
+            self.assertEqual(con.execute("SELECT status FROM posts").fetchone()[0], "needs_check")
+
+    def test_v3_full_platform_routing_defaults_safe_and_opt_in(self):
+        with patch.dict(os.environ, {"FULL_PLATFORMS": "youtube"}):
+            self.assertEqual(publisher.platforms("long"), ["youtube"])
+        with patch.dict(os.environ, {"FULL_PLATFORMS": "facebook,youtube"}):
+            self.assertEqual(publisher.platforms("long"), ["facebook", "youtube"])
+        with patch.dict(os.environ, {"FULL_PLATFORMS": "facebook,tiktok"}):
+            with self.assertRaises(ValueError):
+                publisher.platforms("long")
+        with patch.dict(os.environ, {"FULL_PLATFORMS": "facebook,facebook"}):
+            with self.assertRaises(ValueError):
+                publisher.platforms("long")
+
+    def test_v3_full_caption_has_separate_facebook_text(self):
+        with tempfile.TemporaryDirectory() as folder:
+            video = Path(folder) / "GENERATION_E01.mp4"
+            video.write_bytes(b"sample")
+            sidecar = video.with_suffix(".json")
+            sidecar.write_text(json.dumps({
+                "youtube_title": "Tập 01 — Học cùng AI",
+                "youtube_description": "YouTube full episode description",
+                "facebook_title": "GENERATION | Tập 01",
+                "facebook_description": "Nội dung Facebook riêng",
+            }, ensure_ascii=False), encoding="utf-8")
+            with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+                captions = publisher.make_caption(video, {"duration_seconds": 480}, "long")
+            self.assertEqual(captions["title"], "Tập 01 — Học cùng AI")
+            self.assertEqual(captions["facebook_title"], "GENERATION | Tập 01")
+            self.assertEqual(captions["facebook"], "Nội dung Facebook riêng")
+            self.assertNotIn("#Shorts", captions["facebook"])
+
+    def test_v3_facebook_video_upload_uses_page_videos_not_reels(self):
+        video = None
+        with tempfile.TemporaryDirectory() as folder:
+            video = Path(folder) / "episode.mp4"
+            video.write_bytes(b"1234567890")
+            class Response:
+                def raise_for_status(self):
+                    return None
+                def json(self):
+                    return {"id": "fb-episode-42"}
+            class Encoder:
+                content_type = "multipart/form-data; boundary=test"
+                def __init__(self, fields):
+                    self.fields = fields
+            fake_toolbelt = types.ModuleType("requests_toolbelt")
+            fake_multipart = types.ModuleType("requests_toolbelt.multipart")
+            fake_encoder = types.ModuleType("requests_toolbelt.multipart.encoder")
+            fake_encoder.MultipartEncoder = Encoder
+            with patch.dict(sys.modules, {
+                "requests_toolbelt": fake_toolbelt,
+                "requests_toolbelt.multipart": fake_multipart,
+                "requests_toolbelt.multipart.encoder": fake_encoder,
+            }), patch.dict(os.environ, {
+                "FB_PAGE_ACCESS_TOKEN": "fake-private-token", "FB_PAGE_ID": "12345",
+                "FB_GRAPH_VERSION": "v27.0", "FB_FULL_MAX_BYTES": "1000",
+            }), patch.object(backends.requests, "post", return_value=Response()) as request:
+                status, ident = backends.facebook_video_publish(video, {
+                    "title": "YouTube title", "facebook_title": "Facebook title",
+                    "youtube": "YouTube description", "facebook": "Facebook description",
+                })
+            self.assertEqual((status, ident), ("submitted", "fb-episode-42"))
+            self.assertEqual(request.call_count, 1)
+            args, kwargs = request.call_args
+            self.assertEqual(args[0], "https://graph.facebook.com/v27.0/12345/videos")
+            self.assertEqual(kwargs["data"].fields["title"], "Facebook title")
+            self.assertEqual(kwargs["data"].fields["description"], "Facebook description")
+            self.assertEqual(kwargs["data"].fields["published"], "true")
+            self.assertEqual(kwargs["data"].fields["source"][0], "episode.mp4")
+
+    def test_v3_facebook_video_upload_rejects_large_file_before_api(self):
+        with tempfile.TemporaryDirectory() as folder:
+            video = Path(folder) / "huge.mp4"
+            video.write_bytes(b"too-long")
+            with patch.dict(os.environ, {"FB_PAGE_ACCESS_TOKEN": "fake", "FB_PAGE_ID": "123",
+                                      "FB_FULL_MAX_BYTES": "4"}), \
+                 patch.object(backends.requests, "post") as mock_post:
+                with self.assertRaisesRegex(PreflightError, "safety limit"):
+                    backends.facebook_video_publish(video, {"title": "x", "facebook": "x"})
+                mock_post.assert_not_called()
+
+    def test_v3_full_dispatch_creates_both_posts_and_publishes_each_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            episode = root / "episode.mp4"
+            episode.write_bytes(b"genuine-for-test-only")
+            with patch.object(publisher, "DATABASE", root / "db.sqlite3"), \
+                 patch.object(publisher, "validate", return_value={"duration_seconds": 480}), \
+                 patch.dict(os.environ, {"FULL_PLATFORMS": "facebook,youtube", "FB_PAGE_ID": "testpage",
+                                      "FB_PAGE_ACCESS_TOKEN": "fake-token", "FULL_MAX_DAILY_POSTS": "1"}):
+                with publisher.db() as con:
+                    con.execute("INSERT INTO videos(fingerprint,path,title_hint,created_at,kind) VALUES (?,?,?,?,?)",
+                                (publisher.file_fingerprint(episode), str(episode), "episode", "now", "long"))
+                    with patch.object(publisher, "make_caption", return_value={
+                        "title": "Tập 01", "facebook_title": "FB Tập 01", "facebook": "Tập 01 đầy đủ",
+                        "youtube": "YouTube description"}), \
+                         patch.object(backends, "youtube_client"), \
+                         patch.object(backends, "facebook_video_publish", return_value=("submitted", "fb123")) as fb_call, \
+                         patch.object(backends, "youtube_publish", return_value=("submitted", "yt123")) as yt_call, \
+                         patch.object(publisher, "send_notice"):
+                        fixed = datetime(2026, 11, 23, 19, 0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh"))
+                        publisher.create_dispatch(con, "full:2026-11-23-19:00", fixed, "long")
+                        publisher.publish_pending(con, "long")
+                        publisher.publish_pending(con, "long")
+                    fb_call.assert_called_once()
+                    yt_call.assert_called_once()
+                    results = con.execute("SELECT platform,status,remote_id FROM posts ORDER BY platform").fetchall()
+                    self.assertEqual([tuple(r) for r in results], [
+                        ("facebook", "submitted", "fb123"), ("youtube", "submitted", "yt123")])
+
+    def test_v3_fb_long_failure_never_retries_or_blocks_youtube(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            episode = root / "episode.mp4"
+            episode.write_bytes(b"example")
+            with patch.object(publisher, "DATABASE", root / "db.sqlite3"), \
+                 patch.dict(os.environ, {"FB_PAGE_ID": "123", "FB_PAGE_ACCESS_TOKEN": "fake"}):
+                with publisher.db() as con:
+                    con.execute("INSERT INTO videos(fingerprint,path,title_hint,created_at,kind) VALUES (?,?,?,?,?)",
+                                (publisher.file_fingerprint(episode), str(episode), "ep", "now", "long"))
+                    con.execute("INSERT INTO dispatches(slot_key,video_id,day,caption_json,metadata_json,created_at) "
+                                "VALUES (?,?,?,?,?,?)", ("full:today", 1, "2026-11-23",
+                                json.dumps({"title": "Ep", "facebook": "text", "youtube": "text"}),
+                                json.dumps({"duration_seconds": 480}), "now"))
+                    con.executemany("INSERT INTO posts(dispatch_id,platform,status,updated_at) VALUES (1,?,?,?)",
+                                    [("facebook", "queued", "now"), ("youtube", "queued", "now")])
+                    con.commit()
+                    with patch.object(backends, "facebook_video_publish", side_effect=TimeoutError("upload uncertain")) as fb, \
+                         patch.object(backends, "youtube_client"), \
+                         patch.object(backends, "youtube_publish", return_value=("submitted", "yt-1")) as yt, \
+                         patch.object(publisher, "send_notice"):
+                        publisher.publish_pending(con, "long")
+                        publisher.publish_pending(con, "long")
+                    fb.assert_called_once()
+                    yt.assert_called_once()
+                    actual = dict((r["platform"], r["status"]) for r in con.execute("SELECT platform,status FROM posts"))
+                    self.assertEqual(actual, {"facebook": "needs_check", "youtube": "submitted"})
+
+    def test_v3_facebook_full_status_only_marks_published_on_confirmation(self):
+        class Resp:
+            def __init__(self, body):
+                self.body = body
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return self.body
+        with patch.dict(os.environ, {"FB_PAGE_ACCESS_TOKEN": "fake"}):
+            for response_data, expected in [
+                ({"status": {"video_status": "processing"}}, "submitted"),
+                ({"status": {"video_status": "ready"}}, "submitted"),
+                ({"status": {"publishing_phase": {"publish_status": "published"}}}, "published"),
+                ({"is_published": True}, "published"),
+                ({"status": {"video_status": "error"}}, "failed"),
+            ]:
+                with patch.object(backends.requests, "get", return_value=Resp(response_data)) as call:
+                    self.assertEqual(backends.facebook_video_status("fb987"), expected)
+                    self.assertIn("/fb987", call.call_args.args[0])
+
+    def test_v3_preflight_oversize_keeps_job_blocked_before_network(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            episode = root / "episode.mp4"
+            episode.write_bytes(b"0123456789")
+            with patch.object(publisher, "DATABASE", root / "db.sqlite3"), \
+                 patch.dict(os.environ, {"FB_PAGE_ID": "123", "FB_PAGE_ACCESS_TOKEN": "fake",
+                                      "FB_FULL_MAX_BYTES": "5"}):
+                with publisher.db() as con:
+                    con.execute("INSERT INTO videos(fingerprint,path,title_hint,created_at,kind) VALUES (?,?,?,?,?)",
+                                (publisher.file_fingerprint(episode), str(episode), "ep", "now", "long"))
+                    con.execute("INSERT INTO dispatches(slot_key,video_id,day,caption_json,metadata_json,created_at) "
+                                "VALUES (?,?,?,?,?,?)", ("full:today", 1, "2026-11-23",
+                                json.dumps({"title": "Ep", "facebook": "text", "youtube": "text"}),
+                                json.dumps({"duration_seconds": 480}), "now"))
+                    con.execute("INSERT INTO posts(dispatch_id,platform,status,updated_at) VALUES (1,'facebook','queued','now')")
+                    con.commit()
+                    with patch.object(backends, "facebook_video_publish") as call:
+                        publisher.publish_pending(con, "long")
+                        call.assert_not_called()
+                    self.assertEqual(con.execute("SELECT status FROM posts").fetchone()[0], "blocked")
+
+
+if __name__ == "__main__":
+    unittest.main()
