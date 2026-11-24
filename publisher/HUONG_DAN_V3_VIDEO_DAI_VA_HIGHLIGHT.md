@@ -142,6 +142,8 @@ python publisher.py run-now --stream long
 
 Để chạy highlights sau đó:
 
+**Lệnh này cũng đăng thật. Nếu có Facebook trong `PLATFORMS`, bài highlight sẽ được đăng công khai.**
+
 ```bash
 python publisher.py run-now --stream short
 ```
