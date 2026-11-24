@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import doctor
+import publisher
 
 
 class DoctorTests(unittest.TestCase):
@@ -52,6 +53,14 @@ class DoctorTests(unittest.TestCase):
             with patch("doctor.shutil.which", return_value="/usr/bin/ffmpeg"):
                 broken = doctor.report({"VIDEO_DIR": tmp, "PLATFORMS": "facebook", "PUBLISH_MANIFEST": "manifest.json"}, root)
             self.assertTrue(any(x.name == "PUBLISH_MANIFEST" and x.severity == "FAIL" for x in broken))
+
+    def test_publisher_doctor_skips_database_and_upload_flow(self):
+        with patch.object(sys, "argv", ["publisher.py", "doctor"]), \
+                patch.object(publisher, "exclusive_lock", side_effect=AssertionError("would lock")), \
+                patch.object(publisher, "db", side_effect=AssertionError("would open DB")), \
+                patch.object(doctor, "main", return_value=0) as doctor_main:
+            self.assertEqual(publisher.main(), 0)
+            doctor_main.assert_called_once_with([])
 
     def test_youtube_oauth_files_are_checked_locally(self):
         with tempfile.TemporaryDirectory() as tmp:
