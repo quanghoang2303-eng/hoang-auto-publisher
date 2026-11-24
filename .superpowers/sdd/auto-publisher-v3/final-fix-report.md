@@ -14,3 +14,10 @@
 - Root Pages check `git diff --quiet -- index.html privacy.html terms.html styles.css`: exit 0 (untouched).
 - Artifact check `test ! -e .superpowers/sdd/auto-publisher-v3/task-1-report.md`: exit 0.
 - No live publishing or external account upload performed.
+
+## Re-review fix
+- The failure handler now reads the durable Facebook session and offset back from SQLite after the callback fails, so a session created on the current attempt qualifies for safe queue-and-resume.
+- Added regression coverage for first-run START saving a session, exhausted chunk retries returning the row to `queued`, and the following run reusing that session through successful FINISH without issuing another START.
+- Focused command: `PYTHONPATH=tests python3 -m unittest test_core.PublisherTests.test_facebook_first_run_retry_exhaustion_queues_saved_session_and_resumes` with an in-memory `dotenv.load_dotenv` stub: `Ran 1 test ... OK`.
+- Full offline suite with the same stub: `Ran 31 tests ... OK`.
+- `git diff --check`: passed. No live post performed.

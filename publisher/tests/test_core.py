@@ -424,6 +424,56 @@ class PublisherTests(unittest.TestCase):
                     row = con.execute("SELECT status,upload_session,upload_offset FROM posts WHERE platform='facebook'").fetchone()
                 self.assertEqual(tuple(row), ("queued", "sess", 0))
 
+    def test_facebook_first_run_retry_exhaustion_queues_saved_session_and_resumes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            video = root / "episode.mp4"
+            video.write_bytes(b"12345678")
+            with patch.object(publisher, "DATABASE", root / "db.sqlite3"), \
+                 patch.dict(os.environ, {"FB_PAGE_ID":"1", "FB_PAGE_ACCESS_TOKEN":"test",
+                    "FB_ALLOW_PUBLIC_POSTING":"true", "FB_UPLOAD_CHUNK_BYTES":"4", "FB_UPLOAD_CHUNK_RETRIES":"0"}), \
+                 publisher.db() as con:
+                con.execute("INSERT INTO videos(fingerprint,path,title_hint,created_at,kind,file_size) VALUES (?,?,?,?,?,?)",
+                            (publisher.file_fingerprint(video), str(video), "ep", "now", "long", 8))
+                con.execute("INSERT INTO dispatches(slot_key,video_id,day,caption_json,metadata_json,created_at) VALUES (?,?,?,?,?,?)",
+                            ("full:today", 1, "today", json.dumps({"title":"T","facebook":"F","youtube":"Y"}),
+                             json.dumps({"duration_seconds":10}), "now"))
+                con.execute("INSERT INTO posts(dispatch_id,platform,status,updated_at) VALUES (1,'facebook','queued','now')")
+                con.commit()
+                start_response = types.SimpleNamespace(
+                    raise_for_status=lambda: None,
+                    json=lambda: {"upload_session_id":"new-session","video_id":"fb-1","start_offset":"0","end_offset":"4"})
+                def first_run_request(url, data, timeout):
+                    if data["upload_phase"] == "start": return start_response
+                    if data["upload_phase"] == "transfer": raise backends.Timeout("lost chunk response")
+                    raise AssertionError("FINISH must not be called after failed transfer")
+                with patch.object(backends.requests, "post", side_effect=first_run_request), \
+                     patch.object(publisher, "send_notice"):
+                    publisher.publish_pending(con, "long")
+                row = con.execute("SELECT status,upload_session,upload_offset FROM posts WHERE platform='facebook'").fetchone()
+                self.assertEqual(tuple(row), ("queued", "new-session", 0))
+
+                def resumed_request(url, data, timeout):
+                    if data["upload_phase"] == "transfer":
+                        self.assertEqual(data["upload_session_id"], "new-session")
+                        if data["start_offset"] == "0":
+                            return types.SimpleNamespace(raise_for_status=lambda: None,
+                                json=lambda: {"start_offset":"4","end_offset":"8"})
+                        self.assertEqual(data["start_offset"], "4")
+                        return types.SimpleNamespace(raise_for_status=lambda: None,
+                            json=lambda: {"start_offset":"8","end_offset":"8"})
+                    if data["upload_phase"] == "finish":
+                        return types.SimpleNamespace(raise_for_status=lambda: None,
+                            json=lambda: {"video_id":"fb-1"})
+                    raise AssertionError("resume must not create a second upload session")
+                with patch.object(backends.requests, "post", side_effect=resumed_request) as resumed, \
+                     patch.object(publisher, "send_notice"):
+                    publisher.publish_pending(con, "long")
+                self.assertEqual([call.kwargs["data"]["upload_phase"] for call in resumed.call_args_list],
+                                 ["transfer", "transfer", "finish"])
+                final = con.execute("SELECT status,upload_session,upload_offset FROM posts WHERE platform='facebook'").fetchone()
+                self.assertEqual(tuple(final), ("submitted", "new-session", 8))
+
     def test_facebook_rejects_bad_provider_offsets_without_finishing(self):
         class Response:
             def __init__(self, body): self.body = body

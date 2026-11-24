@@ -537,8 +537,13 @@ def publish_pending(con: sqlite3.Connection, kind: str | None = None):
             message = redact_error(exc)
             # A known Page Videos session with an acknowledged checkpoint before EOF
             # can safely retry from that exact offset on the next scheduler tick.
+            durable = con.execute("SELECT upload_session,upload_offset FROM posts "
+                                   "WHERE dispatch_id=? AND platform=?",
+                                   (p["dispatch_id"], platform)).fetchone()
+            saved_session = durable["upload_session"] if durable else None
+            saved_offset = durable["upload_offset"] if durable else -1
             safe_fb_resume = (platform == "facebook" and p["kind"] == "long"
-                              and p["upload_session"] and 0 <= p["upload_offset"] < path.stat().st_size
+                              and saved_session and 0 <= saved_offset < path.stat().st_size
                               and isinstance(exc, backends.TRANSFER_RETRY_ERRORS))
             if safe_fb_resume:
                 post_update(con, p["dispatch_id"], platform, "queued", error=message)
