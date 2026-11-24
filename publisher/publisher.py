@@ -526,8 +526,8 @@ def publish_pending(con: sqlite3.Connection, kind: str | None = None):
             post_update(con, p["dispatch_id"], platform, "blocked", error=str(exc))
             print(f"BLOCKED {platform}: {exc}")
             continue
-        # If any call after this point fails, the remote state is uncertain.
-        # Never automatically retry or double-post.
+        # Facebook Page Video transfer errors may resume a known checkpoint;
+        # all other ambiguous remote failures remain manual to avoid duplicates.
         post_update(con, p["dispatch_id"], platform, "inflight")
         try:
             status, remote = callback()
@@ -535,8 +535,17 @@ def publish_pending(con: sqlite3.Connection, kind: str | None = None):
             send_notice(f"{platform}: {status} | {path.name} | remote={remote}")
         except Exception as exc:
             message = redact_error(exc)
-            post_update(con, p["dispatch_id"], platform, "needs_check", error=message)
-            send_notice(f"CHECK MANUALLY {platform}: {path.name} — {message}")
+            # A known Page Videos session with an acknowledged checkpoint before EOF
+            # can safely retry from that exact offset on the next scheduler tick.
+            safe_fb_resume = (platform == "facebook" and p["kind"] == "long"
+                              and p["upload_session"] and 0 <= p["upload_offset"] < path.stat().st_size
+                              and isinstance(exc, backends.TRANSFER_RETRY_ERRORS))
+            if safe_fb_resume:
+                post_update(con, p["dispatch_id"], platform, "queued", error=message)
+                send_notice(f"RETRY QUEUED facebook: {path.name} — resume saved upload session")
+            else:
+                post_update(con, p["dispatch_id"], platform, "needs_check", error=message)
+                send_notice(f"CHECK MANUALLY {platform}: {path.name} — {message}")
 
 
 def quarantine_interrupted_uploads(con: sqlite3.Connection):

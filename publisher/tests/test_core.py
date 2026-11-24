@@ -7,6 +7,7 @@ import sys
 import tempfile
 import types
 import unittest
+from requests.exceptions import Timeout
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -377,6 +378,52 @@ class PublisherTests(unittest.TestCase):
             self.assertEqual(request.call_args_list[-1].kwargs["data"]["description"], "Manifest FB description")
             self.assertEqual(saved[-1], ("sess1", 10, "fb-episode-42"))
 
+    def test_facebook_retries_timed_out_chunk_at_same_offset(self):
+        class Response:
+            def __init__(self, body): self.body = body
+            def raise_for_status(self): pass
+            def json(self): return self.body
+        with tempfile.TemporaryDirectory() as folder:
+            video = Path(folder) / "episode.mp4"
+            video.write_bytes(b"1234")
+            replies = [Response({"upload_session_id":"sess","video_id":"fb-1","start_offset":"0","end_offset":"4"}),
+                       Timeout("response lost after acceptance"),
+                       Response({"start_offset":"4","end_offset":"4"}),
+                       Response({"video_id":"fb-1"})]
+            with patch.dict(os.environ, {"FB_PAGE_ACCESS_TOKEN":"test", "FB_PAGE_ID":"1",
+                    "FB_ALLOW_PUBLIC_POSTING":"true", "FB_UPLOAD_CHUNK_BYTES":"4"}), \
+                 patch.object(backends.requests, "post", side_effect=replies) as request:
+                status, ident = backends.facebook_video_publish(video, {"title":"T", "youtube":"Y"})
+            self.assertEqual((status, ident), ("submitted", "fb-1"))
+            transfer_calls = [c for c in request.call_args_list if c.kwargs.get("data", {}).get("upload_phase") == "transfer"]
+            self.assertEqual(len(transfer_calls), 2)
+            self.assertEqual([c.kwargs["data"]["start_offset"] for c in transfer_calls], ["0", "0"])
+            self.assertEqual([c.kwargs["data"]["upload_session_id"] for c in transfer_calls], ["sess", "sess"])
+
+    def test_facebook_exhausted_chunk_retries_returns_queued_for_same_session(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            video = root / "episode.mp4"
+            video.write_bytes(b"1234")
+            with patch.object(publisher, "DATABASE", root / "db.sqlite3"), \
+                 patch.dict(os.environ, {"FB_PAGE_ID":"1", "FB_PAGE_ACCESS_TOKEN":"test",
+                    "FB_ALLOW_PUBLIC_POSTING":"true", "FB_UPLOAD_CHUNK_BYTES":"4", "FB_UPLOAD_CHUNK_RETRIES":"0"}), \
+                 publisher.db() as con:
+                con.execute("INSERT INTO videos(fingerprint,path,title_hint,created_at,kind,file_size) VALUES (?,?,?,?,?,?)",
+                            (publisher.file_fingerprint(video), str(video), "ep", "now", "long", 4))
+                con.execute("INSERT INTO dispatches(slot_key,video_id,day,caption_json,metadata_json,created_at) VALUES (?,?,?,?,?,?)",
+                            ("full:today", 1, "today", json.dumps({"title":"T","facebook":"F","youtube":"Y"}),
+                             json.dumps({"duration_seconds":10}), "now"))
+                con.execute("INSERT INTO posts(dispatch_id,platform,status,upload_session,upload_offset,updated_at) VALUES (1,'facebook','queued','sess',0,'now')")
+                con.commit()
+                def request(url, data, timeout):
+                    if data["upload_phase"] == "transfer": raise backends.Timeout("lost response")
+                    raise AssertionError("saved session must avoid START and FINISH")
+                with patch.object(backends.requests, "post", side_effect=request), patch.object(publisher, "send_notice"):
+                    publisher.publish_pending(con, "long")
+                    row = con.execute("SELECT status,upload_session,upload_offset FROM posts WHERE platform='facebook'").fetchone()
+                self.assertEqual(tuple(row), ("queued", "sess", 0))
+
     def test_facebook_rejects_bad_provider_offsets_without_finishing(self):
         class Response:
             def __init__(self, body): self.body = body
@@ -471,7 +518,7 @@ class PublisherTests(unittest.TestCase):
                     con.executemany("INSERT INTO posts(dispatch_id,platform,status,updated_at) VALUES (1,?,?,?)",
                                     [("facebook", "queued", "now"), ("youtube", "queued", "now")])
                     con.commit()
-                    with patch.object(backends, "facebook_video_publish", side_effect=TimeoutError("upload uncertain")) as fb, \
+                    with patch.object(backends, "facebook_video_publish", side_effect=RuntimeError("upload uncertain")) as fb, \
                          patch.object(backends, "youtube_client"), \
                          patch.object(backends, "youtube_publish", return_value=("submitted", "yt-1")) as yt, \
                          patch.object(publisher, "send_notice"):

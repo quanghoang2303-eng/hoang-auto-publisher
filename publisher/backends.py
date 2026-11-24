@@ -5,6 +5,10 @@ import os
 from pathlib import Path
 
 import requests
+from requests.exceptions import ChunkedEncodingError, ConnectionError, HTTPError, Timeout
+
+
+TRANSFER_RETRY_ERRORS = (Timeout, ConnectionError, ChunkedEncodingError, HTTPError)
 
 
 class PreflightError(RuntimeError):
@@ -156,6 +160,9 @@ def facebook_video_publish(video: Path, caption: dict, metadata: dict | None = N
             save_state(session_id, offset, video_id)
     else:
         video_id = state.get("video_id")
+    max_retries = int(os.getenv("FB_UPLOAD_CHUNK_RETRIES", "3"))
+    if not 0 <= max_retries <= 10:
+        raise PreflightError("FB_UPLOAD_CHUNK_RETRIES must be between 0 and 10")
     with video.open("rb") as handle:
         while offset < size:
             requested_end = min(offset + chunk_size, provider_end, size)
@@ -165,10 +172,26 @@ def facebook_video_publish(video: Path, caption: dict, metadata: dict | None = N
             payload = handle.read(requested_end - offset)
             if len(payload) != requested_end - offset:
                 raise RuntimeError("Video ended before the requested Facebook chunk was read")
-            response = requests.post(url, data={"access_token": token, "upload_phase": "transfer",
-                "upload_session_id": session_id, "start_offset": str(offset), "video_file_chunk": payload},
-                timeout=(30, 600))
-            result = checked(response)
+            transfer_data = {"access_token": token, "upload_phase": "transfer",
+                "upload_session_id": session_id, "start_offset": str(offset), "video_file_chunk": payload}
+            attempt = 0
+            while True:
+                try:
+                    response = requests.post(url, data=transfer_data, timeout=(30, 600))
+                    response.raise_for_status()
+                    result = response.json()
+                    if result.get("error") and result["error"].get("code") != "ok":
+                        raise RuntimeError(f"API rejected the request: {result['error']}")
+                    break
+                except (Timeout, ConnectionError, ChunkedEncodingError):
+                    if attempt >= max_retries:
+                        raise
+                    attempt += 1
+                except HTTPError as exc:
+                    status = exc.response.status_code if exc.response is not None else None
+                    if status not in {408, 425, 429, 500, 502, 503, 504} or attempt >= max_retries:
+                        raise
+                    attempt += 1
             next_offset = _upload_offset(result, "start_offset", size)
             provider_end = _upload_offset(result, "end_offset", size)
             if next_offset != requested_end or provider_end < next_offset or (next_offset < size and provider_end == next_offset):
