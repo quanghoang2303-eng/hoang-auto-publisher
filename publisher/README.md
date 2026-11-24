@@ -7,12 +7,13 @@ Run two independent local queues: 1–5 daily vertical **highlights** to Faceboo
 ## Important limitations
 
 - **TikTok:** TikTok's Content Posting API guidelines explicitly reject personal/internal uploader utilities as eligible API clients and require that users preview/control/consent to what is posted. Public Direct Post is gated behind review. A per-video JSON flag in this MVP is only a technical guard, **not a substitute for TikTok-compliant UX/review**. Assume `TIKTOK_MODE=off` unless your use case qualifies. Android ADB relies on UI automation and may violate platform terms or break after app updates; test with a separate account, and never bypass security challenges.
-- **Facebook:** The Page must be controlled by a person with the `CREATE_CONTENT` task; use a valid Page Access Token with `pages_manage_posts`, `pages_read_engagement`, `pages_show_list` as applicable, plus app review/access if required. The Reel Publishing API accepts a video for processing and may not instantly display it publicly.
+- **Facebook:** Every live post is public. Both Page Reels (highlights) and Page Videos (full episodes) require `ENABLE_LIVE_POSTING=true` **and** `FB_ALLOW_PUBLIC_POSTING=true`. Use a Page Access Token and the Page's `CREATE_CONTENT` task, with the relevant permissions and app review/access. Accepted uploads may need processing before they appear.
 - **YouTube:** `videos.insert` works for both Shorts and regular videos with the same `youtube.upload` scope. Square/vertical videos up to 3 minutes are usually Shorts; the shared short-form queue deliberately accepts only 4–60 seconds and 9:16. Long-form accepts landscape videos, or square/vertical videos **longer than 3 minutes**. YouTube OAuth token authorization is a one-time interactive action, refresh may require renewed permission.
 - ADB cannot guarantee publication from a button press. Its result is `submitted_unverified`; verify the TikTok profile occasionally.
 - Videos containing third-party music can trigger copyright restrictions. Do not treat successful upload as proof that the video is public or monetizable.
 - Mac must be **awake**, connected to the Internet and (for ADB) to an unlocked Android device. A sleeping Mac will miss scheduled windows.
-- YouTube resumable uploads retry temporary chunk errors up to 3 times **during the same process**. No automatic re-upload after an ambiguous crash/network failure: `needs_check` means manually inspect the platform before retrying. This avoids accidental duplicates; it does not provide mathematical exactly-once delivery.
+- YouTube uses resumable 8 MiB upload chunks and retries temporary chunk errors up to 3 times during the same process. A returned video ID is `submitted`, not proof of publication. Later checks distinguish processed public/unlisted videos (`published`), private or still-processing videos (`submitted`), and failed/rejected uploads (`failed`). An interrupted or ambiguous upload becomes `needs_check`; inspect YouTube Studio before retrying.
+- Facebook full episodes use resumable start/transfer/finish uploads with the session ID and byte offset saved in SQLite after each chunk. An interrupted transfer with bytes remaining can continue on the next run. An interruption after all bytes are transferred may have happened during `FINISH`; it becomes `needs_check` and requires manual Page reconciliation before retrying. Facebook highlights still use the Reels start/upload/finish flow.
 
 ## Requirements
 
@@ -58,14 +59,14 @@ ENABLE_LIVE_POSTING=false
 
 ### Upgrade safely from the Shorts-only version
 
-Back up your existing `mac-reels-publisher/state/`, `.env`, `token.json`, and `client_secret.json` before replacing code. Copy the **code and `.env.example`**, not the existing state or secrets, from the new ZIP into the existing project folder; add the new `FULL_*` options to your existing `.env` without overwriting the original credentials; old `YT_LONG_*` keys remain compatible. The first run migrates the SQLite `videos` table by adding `kind='short'` to existing entries. Existing dispatches, status history, and deduplication fingerprints are preserved. Do not run two separate copies of the same project against the same SQLite database.
+Back up your existing project state, `.env`, `token.json`, and `client_secret.json` before replacing code. Copy code and `.env.example`, keep your existing state and secrets, and add new `FULL_*` options to the existing `.env` without replacing credentials. Old `YT_LONG_*` settings remain compatible. Startup adds missing SQLite columns to `videos` and `posts`; existing rows, dispatches and fingerprints are preserved. No database reset or credential replacement is needed. Do not run two copies against the same database.
 
 ## Facebook Page setup
 
 1. Go to [Meta for Developers](https://developers.facebook.com/), create/select an app with Page functionality. Request the appropriate Page permissions, and check app review/business verification requirements for your account.
 2. Obtain a **Page Access Token**, not merely a user token, from the authorized Page. Have the `CREATE_CONTENT` Page task and required Page permissions.
 3. Set `FB_PAGE_ID` and `FB_PAGE_ACCESS_TOKEN` in `.env`.
-4. For **highlights** the code uses `/{page_id}/video_reels` (`START`, upload, `FINISH`). For **full episodes** it uses `POST /{page_id}/videos` with streamed multipart `source`, `title` and `description`; default 1 GB safety cap via `FB_FULL_MAX_BYTES` (no resumable implementation yet). Facebook may display both as Reels due to its 2025 video unification.
+4. Highlights use `/{page_id}/video_reels` (`START`, upload, `FINISH`). Full episodes use `/{page_id}/videos` in resumable `start`, `transfer`, `finish` phases. Defaults are a 1,000,000,000-byte limit (`FB_FULL_MAX_BYTES`), 43,200-second duration limit (`FB_FULL_MAX_DURATION_SECONDS`) and 8 MiB chunks (`FB_UPLOAD_CHUNK_BYTES`). These are configurable safety limits; preflight blocks oversized/overlong files before upload. Facebook posts are public, and both flags `ENABLE_LIVE_POSTING=true` and `FB_ALLOW_PUBLIC_POSTING=true` are required. Facebook may display longer videos as Reels after its product change, even though the workflow routes highlights and full episodes differently.
 
 Meta official resources:
 - https://developers.facebook.com/docs/graph-api/reference/page/video_reels
@@ -76,7 +77,7 @@ Meta official resources:
 
 ### V3: Important Facebook behavior
 
-Meta announced in June 2025 that all Facebook videos are shared as Reels regardless of length or orientation. Thus `full_episodes/` versus `inbox/` is a **workflow/marketing distinction**, not a promise of distinct Facebook UI post types. Use `FULL_PLATFORMS=facebook,youtube` only after testing the Page token and posting a non-sensitive episode. See `HUONG_DAN_V3_VIDEO_DAI_VA_HIGHLIGHT.md` for Mac setup, per-platform metadata, migration and safety steps.
+Meta announced in June 2025 that Facebook may present longer videos as Reels regardless of length or orientation. The app still routes full episodes through Page Videos and highlights through Page Reels. See `HUONG_DAN_V3_VIDEO_DAI_VA_HIGHLIGHT.md` for Mac setup, per-platform metadata, migration and safety steps.
 
 ## YouTube setup
 
@@ -96,11 +97,11 @@ Google official docs:
 
 ## Full-episode auto posting: Facebook Page + YouTube (V3)
 
-The **separate** full-episode queue is enabled when `FULL_VIDEO_DIR` (or the old `YT_LONG_VIDEO_DIR`) is set. `FULL_POST_TIMES` is independent of Shorts' `POST_TIMES`; `FULL_POST_DAYS` accepts `mon,tue,wed,thu,fri,sat,sun` (blank means daily). Its daily cap is `FULL_MAX_DAILY_POSTS` (1–5). `FULL_PLATFORMS=facebook,youtube` sends a distinct post job to each destination. **For safe upgrades from V2, the default without FULL_PLATFORMS is youtube only.** TikTok is never a full-episode destination. If both streams trigger at the same minute, the single scheduler handles highlights first and full episodes second.
+The **separate** full-episode queue is enabled when `FULL_VIDEO_DIR` (or the old `YT_LONG_VIDEO_DIR`) is set. `FULL_POST_TIMES` is independent of Shorts' `POST_TIMES`; `FULL_POST_DAYS` accepts `mon,tue,wed,thu,fri,sat,sun` (blank means daily). Its daily cap is `FULL_MAX_DAILY_POSTS` (1–5). `FULL_PLATFORMS=facebook,youtube` sends a distinct post job to each destination. **For safe upgrades from V2, the default without FULL_PLATFORMS is youtube only.** TikTok is never a full-episode destination. If both streams trigger at the same minute, the single scheduler handles highlights first and full episodes second. Both Facebook destinations are public and need both live-posting flags.
 
-Facebook Page Videos uses a multipart upload for files within `FB_FULL_MAX_BYTES` (default 1,000,000,000 bytes). Meta's asynchronous response is not proof of public visibility; check the Page. Files above the cap are blocked **before upload**. For large files, implement/resume Meta's chunked upload API rather than increasing the cap blindly. The Facebook full-episode status is polled and only reported as `published` if Meta explicitly confirms publication. Meta's post-2025 product may label both long episodes and highlights as Reels.
+Facebook Page Videos uses resumable start/transfer/finish uploads. `FB_FULL_MAX_BYTES` defaults to 1,000,000,000 bytes, `FB_FULL_MAX_DURATION_SECONDS` to 43,200 seconds (12 hours), and `FB_UPLOAD_CHUNK_BYTES` to 8,388,608 bytes (8 MiB). Session and accepted byte offset are checkpointed to SQLite after each chunk, allowing a partial transfer to resume. A failure after transfer completion or during ambiguous `FINISH` is marked `needs_check`; reconcile the Page manually before any retry. The app polls full-video status and marks it published only when Meta explicitly confirms publication. Meta may present longer videos as Reels; routing still uses Page Videos for full episodes and Page Reels for highlights.
 
-Start with `YT_LONG_PRIVACY=private` until a complete upload is confirmed in YouTube Studio, then change it to `public` for unattended publishing. `YT_LONG_CATEGORY_ID` defaults to `27` (Education) and `YT_MADE_FOR_KIDS` applies to both queues unless overridden per-video; decide the audience accurately for your actual film (cartoon does not automatically mean made for kids, but child-directed material requires the correct setting).
+Start with `YT_LONG_PRIVACY=private` until upload processing is confirmed in YouTube Studio, then choose `public` or `unlisted` for the intended audience. `YT_PRIVACY` controls highlights (default `public`); `YT_LONG_PRIVACY` overrides it for full episodes (default `private`). YouTube OAuth uses the `youtube.upload` scope. The local token is refreshed by the Google client when possible; rerun `authorize-youtube` if refresh is revoked or expired. `YT_LONG_CATEGORY_ID` defaults to `27` (Education) and `YT_MADE_FOR_KIDS` applies to both queues unless overridden per-video; decide the audience accurately for your actual film.
 
 Suggested file layout (the `.txt` and `.json` sidecars are optional):
 
@@ -118,11 +119,32 @@ To provide precise title/description without relying on three AI keyframes, crea
 
 ```json
 {
-  "youtube_title": "GENERATION - Tập 01 | Học cách dẫn dắt AI",
-  "youtube_description": "Giới thiệu tập 01 của series giáo dục AI. Đăng ký để xem tập tiếp theo.",
-  "youtube_made_for_kids": true
+  "videos": [
+    {
+      "kind": "long",
+      "episode_id": "GEN-S01-E01",
+      "media_filename": "GENERATION_S01_E01.mp4",
+      "allowed_targets": ["facebook", "youtube"],
+      "platform_metadata": {
+        "facebook": {"title": "GENERATION — Tập 01 đầy đủ", "description": "Tập 01 của Biệt Đội AI Nhí."},
+        "youtube": {"title": "GENERATION | Tập 01", "description": "Tập đầy đủ số 01.", "category_id": 27, "made_for_kids": true}
+      }
+    },
+    {
+      "kind": "short",
+      "episode_id": "GEN-S01-E01-H01",
+      "media_filename": "GENERATION_S01_E01_H01.mp4",
+      "allowed_targets": ["facebook", "youtube"],
+      "platform_metadata": {
+        "facebook": {"title": "GENERATION | Trích đoạn 01", "description": "Một đoạn ngắn từ tập 01."},
+        "youtube": {"title": "GENERATION | Trích đoạn 01", "description": "Highlight của tập 01."}
+      }
+    }
+  ]
 }
 ```
+
+Save this JSON outside the watched folders and set `PUBLISH_MANIFEST=/absolute/path/manifest.json`. Each entry needs a unique explicit `episode_id`, exact `media_filename`, `kind`, `allowed_targets`, and nonempty `platform_metadata` for every target. `kind` is `long` or `short`; metadata accepts per-platform `title` and `description` (YouTube also accepts numeric `category_id` and boolean `made_for_kids`). The configured `FULL_PLATFORMS` or `PLATFORMS` must match that entry's target set exactly. When `PUBLISH_MANIFEST` is empty, the app uses the existing sidecar/AI/filename fallback. With a manifest configured, every scanned/dispatched media file must have a matching manifest entry.
 
 Use `youtube_made_for_kids` **only after assessing the video audience**. If `youtube_title` or `youtube_description` is supplied, both must be supplied and nonempty. These overrides take precedence over AI. Otherwise, with `OPENAI_API_KEY`, the app samples three frames plus optional `.txt` context and generates long-form title/description; it does not transcribe audio, generate thumbnails, create chapters/timestamps, or add to playlists. Without an API key, it derives the title from the filename or the first `.txt` line, and uses the `.txt` content as description. For full episodes, supply a transcript or reviewed metadata to avoid hallucinated summaries.
 
@@ -132,8 +154,9 @@ Commands:
 python publisher.py scan
 python publisher.py preview --stream long  # dry-run; uploads NOTHING
 python publisher.py preview                # existing short-form preview
-# After reviewing config, credentials, and enabling live posting:
-python publisher.py run-now --stream long  # publishes one long-form video now
+# REAL PUBLISHING: after reviewing config, credentials and public Facebook behavior,
+# setting ENABLE_LIVE_POSTING=true and FB_ALLOW_PUBLIC_POSTING=true as needed:
+python publisher.py run-now --stream long  # posts one long-form video now
 python publisher.py status
 ```
 
@@ -213,7 +236,7 @@ python publisher.py status
 python -m unittest discover -s tests -v
 ```
 
-When credentials are ready, set `ENABLE_LIVE_POSTING=true` in `.env` and start with an isolated test Page/channel. **`run-now` publishes for real** and uses one daily quota slot:
+When credentials are ready, set `ENABLE_LIVE_POSTING=true` in `.env`; Facebook also requires `FB_ALLOW_PUBLIC_POSTING=true`. Start with an isolated test Page/channel and a safe test video. **`run-now` publishes for real** and uses one daily quota slot:
 
 ```bash
 python publisher.py run-now
@@ -257,4 +280,4 @@ Logs: `state/scheduler.log`, `state/scheduler_error.log`; database: `state/publi
 
 ## Scope and future improvements
 
-This is a working integration skeleton, **not battle-tested against your accounts/devices**. To move to production: implement token rotation and secrets storage, genuine per-video TikTok UI/compliance if API approval is possible, robust remote post status checks for Facebook/YouTube, alerts and recovery CLI for `needs_check`, database backup, and Mac sleep/power recovery. For 1–5/day, **SQLite + launchd** is sufficient; n8n and paid orchestration are optional.
+This is a working integration skeleton, **not verified against your accounts/devices**. API documentation and offline tests do not prove that the live Page/channel grants access or that a post will publish. Full Facebook videos and YouTube videos are polled remotely; highlights do not have a remote Facebook status check in this version. `needs_check` cases require manual reconciliation. For 1–5/day, **SQLite + launchd** is sufficient; n8n and paid orchestration are optional.

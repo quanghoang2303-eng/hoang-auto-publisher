@@ -1,13 +1,15 @@
 # Changelog V3 — 2026-11-23
 
-- Added Page Videos adapter `facebook_video_publish` for full-length episodes (`/{page-id}/videos`).
+- Added resumable Page Videos upload for full-length episodes (`/{page-id}/videos`) using start/transfer/finish, with SQLite checkpoints for session and byte offset.
 - Kept existing Page Reels adapter for highlights (`/{page-id}/video_reels`).
 - Full queue now optionally fans out to both `facebook` and `youtube`, each with its own row in `posts`.
 - Added `FULL_VIDEO_DIR`, `FULL_PLATFORMS`, `FULL_POST_TIMES`, `FULL_POST_DAYS`, `FULL_MAX_DAILY_POSTS`; old `YT_LONG_*` work unchanged.
-- Facebook full metadata: `facebook_title` and `facebook_description` JSON sidecar, AI or fallback metadata.
-- Facebook long multipart size safety cap with preflight. Requests go to `graph.facebook.com` by default; older `graph-video.facebook.com` can be explicitly configured but is deprecated.
-- Reconciliation checks remote full-video publication status conservatively; only marks published when confirmed.
-- No automatic retry after ambiguous upload failures, no retroactive Facebook publishing of already-dispatched V2 episodes.
+- Facebook full metadata can come from the optional `PUBLISH_MANIFEST` or per-video sidecar/AI/fallback. Manifest entries name the episode, exact media filename, targets and platform metadata; configured platform targets must match.
+- Facebook long-video preflight enforces configurable byte, duration and chunk limits. Defaults: 1,000,000,000 bytes, 43,200 seconds and 8 MiB per chunk. Both Reels and Page Videos require `ENABLE_LIVE_POSTING=true` and `FB_ALLOW_PUBLIC_POSTING=true`; Facebook posts are public.
+- Partial Facebook transfers resume from the saved session/offset. Ambiguous failures during/after `FINISH` become `needs_check` and require manual reconciliation; no blind retry.
+- Reconciliation checks remote full-video publication status conservatively; only marks published when confirmed. YouTube uploads use resumable chunks and remote status polling; `submitted` is not proof of publication.
+- SQLite schema changes are additive and retain V2 rows, queue state and credentials. No reset or credential replacement is required.
+- Facebook may display longer videos as Reels following its product change; workflow routing remains different for Page Videos and Page Reels.
 - 23 automated offline tests, including new dual-destination and mock-upload cases.
 
 Documentation: `HUONG_DAN_V3_VIDEO_DAI_VA_HIGHLIGHT.md`.
