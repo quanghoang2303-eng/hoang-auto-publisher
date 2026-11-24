@@ -248,10 +248,12 @@ class PublisherTests(unittest.TestCase):
                                       "YT_LONG_CATEGORY_ID": "27", "YT_MADE_FOR_KIDS": "false"}):
             result = backends.youtube_publish(Path("episode.mp4"),
                     {"title": "Episode 01", "youtube": "Nội dung dài"}, kind="long",
-                    metadata={"youtube_made_for_kids": True})
+                    metadata={"youtube_made_for_kids": True, "manifest_platform_metadata": {
+                        "youtube": {"title":"Manifest title", "description":"Manifest description",
+                                    "category_id":"24", "made_for_kids":False}}})
         self.assertEqual(result, ("submitted", "remote-episode-01"))
-        self.assertEqual(captured["body"]["status"], {"privacyStatus": "private", "selfDeclaredMadeForKids": True})
-        self.assertEqual(captured["body"]["snippet"]["categoryId"], "27")
+        self.assertEqual(captured["body"]["status"], {"privacyStatus": "private", "selfDeclaredMadeForKids": False})
+        self.assertEqual(captured["body"]["snippet"], {"title":"Manifest title", "description":"Manifest description", "categoryId":"24"})
         self.assertTrue(captured["resumable"])
         self.assertEqual(captured["num_retries"], 3)
 
@@ -354,22 +356,63 @@ class PublisherTests(unittest.TestCase):
                 def __init__(self, body): self.body = body
                 def raise_for_status(self): pass
                 def json(self): return self.body
-            replies = [Response({"upload_session_id":"sess1","video_id":"fb-episode-42","start_offset":"0"}),
-                       Response({"start_offset":"4"}), Response({"start_offset":"8"}), Response({"start_offset":"10"}),
+            replies = [Response({"upload_session_id":"sess1","video_id":"fb-episode-42","start_offset":"0","end_offset":"4"}),
+                       Response({"start_offset":"4","end_offset":"8"}), Response({"start_offset":"8","end_offset":"10"}),
+                       Response({"start_offset":"10","end_offset":"10"}),
                        Response({"video_id":"fb-episode-42"})]
             saved = []
             with patch.dict(os.environ, {"FB_PAGE_ACCESS_TOKEN":"fake-private-token", "FB_PAGE_ID":"12345",
                     "FB_GRAPH_VERSION":"v27.0", "FB_FULL_MAX_BYTES":"1000", "FB_ALLOW_PUBLIC_POSTING":"true",
                     "FB_UPLOAD_CHUNK_BYTES":"4"}), patch.object(backends.requests, "post", side_effect=replies) as request:
                 status, ident = backends.facebook_video_publish(video,
-                    {"title":"YouTube title", "facebook_title":"Facebook title", "youtube":"YouTube description", "facebook":"Facebook description"},
+                    {"title":"YouTube title", "facebook_title":"Fallback FB title", "youtube":"YouTube description", "facebook":"Fallback FB description"},
+                    metadata={"manifest_platform_metadata":{"facebook":{"title":"Manifest FB title","description":"Manifest FB description"}}},
                     upload_state={}, save_state=lambda session, offset, video_id=None: saved.append((session,offset,video_id)))
             self.assertEqual((status, ident), ("submitted", "fb-episode-42"))
             self.assertEqual(request.call_count, 5)
             self.assertEqual(request.call_args_list[0].kwargs["data"]["upload_phase"], "start")
             self.assertEqual([call.kwargs["data"]["start_offset"] for call in request.call_args_list[1:3]], ["0", "4"])
             self.assertEqual(request.call_args_list[-1].kwargs["data"]["upload_phase"], "finish")
+            self.assertEqual(request.call_args_list[-1].kwargs["data"]["title"], "Manifest FB title")
+            self.assertEqual(request.call_args_list[-1].kwargs["data"]["description"], "Manifest FB description")
             self.assertEqual(saved[-1], ("sess1", 10, "fb-episode-42"))
+
+    def test_facebook_rejects_bad_provider_offsets_without_finishing(self):
+        class Response:
+            def __init__(self, body): self.body = body
+            def raise_for_status(self): pass
+            def json(self): return self.body
+        scenarios = [
+            [Response({"upload_session_id":"s","start_offset":"0","end_offset":"11"})],
+            [Response({"upload_session_id":"s","start_offset":"0","end_offset":"4"}),
+             Response({"start_offset":"3","end_offset":"8"})],
+            [Response({"upload_session_id":"s","start_offset":"0","end_offset":"4"}),
+             Response({"start_offset":"4","end_offset":"11"})],
+            [Response({"upload_session_id":"s","start_offset":"0","end_offset":"4"}),
+             Response({"start_offset":"2","end_offset":"4"})],
+        ]
+        for replies in scenarios:
+            with self.subTest(replies=replies), tempfile.TemporaryDirectory() as folder:
+                video = Path(folder) / "episode.mp4"
+                video.write_bytes(b"0123456789")
+                with patch.dict(os.environ, {"FB_PAGE_ACCESS_TOKEN":"test", "FB_PAGE_ID":"1",
+                        "FB_ALLOW_PUBLIC_POSTING":"true", "FB_UPLOAD_CHUNK_BYTES":"4"}), \
+                     patch.object(backends.requests, "post", side_effect=replies) as request:
+                    with self.assertRaises(RuntimeError):
+                        backends.facebook_video_publish(video, {"title":"T","youtube":"Y"})
+                    self.assertFalse(any(call.kwargs.get("data", {}).get("upload_phase") == "finish"
+                                         for call in request.call_args_list))
+
+    def test_facebook_rejects_out_of_range_saved_offset_before_network(self):
+        with tempfile.TemporaryDirectory() as folder:
+            video = Path(folder) / "episode.mp4"
+            video.write_bytes(b"123")
+            with patch.dict(os.environ, {"FB_PAGE_ACCESS_TOKEN":"test", "FB_PAGE_ID":"1",
+                    "FB_ALLOW_PUBLIC_POSTING":"true"}), patch.object(backends.requests, "post") as request:
+                with self.assertRaisesRegex(PreflightError, "Saved Facebook upload offset"):
+                    backends.facebook_video_publish(video, {"title":"T","youtube":"Y"},
+                                                    upload_state={"session_id":"s","offset":4})
+                request.assert_not_called()
 
     def test_v3_facebook_video_upload_rejects_large_file_before_api(self):
         with tempfile.TemporaryDirectory() as folder:

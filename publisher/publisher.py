@@ -312,7 +312,9 @@ def platforms(kind: str = "short") -> list[str]:
 
 
 def validate_manifest_entry(entry: dict, kind: str, filename: str) -> dict:
-    if not isinstance(entry, dict) or entry.get("kind") != kind or entry.get("media_filename") != filename:
+    media_filename = entry.get("media_filename") if isinstance(entry, dict) else None
+    if (not isinstance(entry, dict) or entry.get("kind") != kind or media_filename != filename
+            or not isinstance(media_filename, str) or Path(media_filename).name != media_filename):
         raise ValueError(f"Manifest stream or media filename mismatch for {filename}")
     if not isinstance(entry.get("episode_id"), str) or not entry["episode_id"].strip():
         raise ValueError(f"Manifest entry for {filename} needs episode_id")
@@ -324,6 +326,17 @@ def validate_manifest_entry(entry: dict, kind: str, filename: str) -> dict:
     if not isinstance(platform_metadata, dict) or set(platform_metadata) != set(targets) or any(
             not isinstance(platform_metadata[target], dict) or not platform_metadata[target] for target in targets):
         raise ValueError(f"Manifest platform_metadata must define metadata for every allowed target of {filename}")
+    for target, fields in platform_metadata.items():
+        for key in ("title", "description"):
+            if key in fields and (not isinstance(fields[key], str) or not fields[key].strip()):
+                raise ValueError(f"Manifest {target}.{key} must be a nonempty string")
+        if target == "youtube":
+            category = fields.get("category_id", fields.get("categoryId"))
+            if category is not None and not str(category).isdigit():
+                raise ValueError("Manifest youtube category_id must be numeric")
+            audience = fields.get("made_for_kids", fields.get("selfDeclaredMadeForKids"))
+            if audience is not None and not isinstance(audience, bool):
+                raise ValueError("Manifest YouTube audience field must be true or false")
     return entry
 
 

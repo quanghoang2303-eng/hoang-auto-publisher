@@ -26,6 +26,16 @@ def checked(response: requests.Response) -> dict:
     return data
 
 
+def _upload_offset(result: dict, name: str, size: int) -> int:
+    value = result.get(name)
+    if not isinstance(value, (str, int)) or not str(value).isdigit():
+        raise RuntimeError(f"Facebook returned an invalid {name}")
+    offset = int(value)
+    if not 0 <= offset <= size:
+        raise RuntimeError(f"Facebook returned an out-of-range {name}")
+    return offset
+
+
 def facebook_publish(video: Path, caption: dict) -> tuple[str, str]:
     """Page Reels: START -> upload binary -> FINISH. Accepted != publicly visible."""
     if os.getenv("FB_ALLOW_PUBLIC_POSTING", "false").lower() != "true":
@@ -106,8 +116,9 @@ def facebook_video_publish(video: Path, caption: dict, metadata: dict | None = N
     facebook_video_preflight(video, (metadata or {}).get("duration_seconds"))
     if os.getenv("FB_ALLOW_PUBLIC_POSTING", "false").lower() != "true":
         raise PreflightError("Set FB_ALLOW_PUBLIC_POSTING=true to allow public Facebook Page posts")
-    title = str(caption.get("facebook_title") or caption["title"]).strip()[:255]
-    description = str(caption.get("facebook") or caption["youtube"]).strip()
+    target_metadata = (metadata or {}).get("manifest_platform_metadata", {}).get("facebook", {})
+    title = str(target_metadata.get("title") or caption.get("facebook_title") or caption["title"]).strip()[:255]
+    description = str(target_metadata.get("description") or caption.get("facebook") or caption["youtube"]).strip()
     if not title or not description:
         raise PreflightError("Full Facebook video needs nonempty title and description")
     # Use dedicated video host, not graph.facebook.com/video_reels.
@@ -122,34 +133,51 @@ def facebook_video_publish(video: Path, caption: dict, metadata: dict | None = N
     if chunk_size < 1:
         raise PreflightError("FB_UPLOAD_CHUNK_BYTES must be a positive integer")
     session_id = state.get("session_id")
-    offset = int(state.get("offset", 0))
+    size = video.stat().st_size
+    try:
+        offset = int(state.get("offset", 0))
+    except (TypeError, ValueError) as exc:
+        raise PreflightError("Saved Facebook upload offset is invalid") from exc
+    if not 0 <= offset <= size or (offset and not session_id):
+        raise PreflightError("Saved Facebook upload offset is outside the video or has no session")
+    provider_end = min(size, offset + chunk_size)
     if not session_id:
         started = checked(requests.post(url, data={"access_token": token, "upload_phase": "start",
-            "file_size": str(video.stat().st_size)}, timeout=30))
+            "file_size": str(size)}, timeout=30))
         session_id = str(started.get("upload_session_id", ""))
         video_id = str(started.get("video_id", "")) or None
-        offset = int(started.get("start_offset", 0))
+        offset = _upload_offset(started, "start_offset", size)
+        provider_end = _upload_offset(started, "end_offset", size)
+        if provider_end <= offset and offset < size:
+            raise RuntimeError("Facebook returned an empty initial upload range")
         if not session_id:
             raise RuntimeError("Facebook did not return an upload session; check remotely before retry")
         if save_state:
             save_state(session_id, offset, video_id)
     else:
         video_id = state.get("video_id")
-    size = video.stat().st_size
     with video.open("rb") as handle:
         while offset < size:
+            requested_end = min(offset + chunk_size, provider_end, size)
+            if requested_end <= offset:
+                raise RuntimeError("Facebook upload range did not advance")
             handle.seek(offset)
-            payload = handle.read(min(chunk_size, size - offset))
+            payload = handle.read(requested_end - offset)
+            if len(payload) != requested_end - offset:
+                raise RuntimeError("Video ended before the requested Facebook chunk was read")
             response = requests.post(url, data={"access_token": token, "upload_phase": "transfer",
                 "upload_session_id": session_id, "start_offset": str(offset), "video_file_chunk": payload},
                 timeout=(30, 600))
             result = checked(response)
-            next_offset = int(result.get("start_offset", offset + len(payload)))
-            if next_offset <= offset:
-                raise RuntimeError("Facebook returned a non-advancing upload offset")
+            next_offset = _upload_offset(result, "start_offset", size)
+            provider_end = _upload_offset(result, "end_offset", size)
+            if next_offset != requested_end or provider_end < next_offset or (next_offset < size and provider_end == next_offset):
+                raise RuntimeError("Facebook returned inconsistent or incomplete upload offsets")
             offset = next_offset
             if save_state:
                 save_state(session_id, offset)
+    if offset != size:
+        raise RuntimeError("Facebook transfer is incomplete; FINISH was not sent")
     finish = checked(requests.post(url, data={"access_token": token, "upload_phase": "finish",
         "upload_session_id": session_id, "title": title, "description": description[:60000],
         "published": "true"}, timeout=60))
@@ -199,13 +227,15 @@ def youtube_publish(video: Path, caption: dict, kind: str = "short", metadata: d
     if kind not in {"short", "long"}:
         raise PreflightError(f"Unknown YouTube stream: {kind}")
     metadata = metadata or {}
+    target_metadata = metadata.get("manifest_platform_metadata", {}).get("youtube", {})
     youtube = youtube_client()
     privacy = (os.getenv("YT_LONG_PRIVACY", "").strip() if kind == "long" else "") or os.getenv("YT_PRIVACY", "public")
     if privacy not in {"public", "private", "unlisted"}:
         raise PreflightError("YT_PRIVACY / YT_LONG_PRIVACY must be public, private, or unlisted")
     status = {"privacyStatus": privacy}
     # Do not silently classify the user's videos under children's-content rules.
-    per_video = metadata.get("youtube_made_for_kids")
+    per_video = target_metadata.get("made_for_kids", target_metadata.get("selfDeclaredMadeForKids",
+                          metadata.get("youtube_made_for_kids")))
     if per_video is not None and not isinstance(per_video, bool):
         raise PreflightError("youtube_made_for_kids in the .json sidecar must be true or false")
     made_for_kids = os.getenv("YT_MADE_FOR_KIDS", "").strip().lower()
@@ -215,11 +245,15 @@ def youtube_publish(video: Path, caption: dict, kind: str = "short", metadata: d
         status["selfDeclaredMadeForKids"] = made_for_kids == "true"
     elif made_for_kids:
         raise PreflightError("YT_MADE_FOR_KIDS must be true, false, or left empty")
-    category = os.getenv("YT_LONG_CATEGORY_ID", "27") if kind == "long" else "22"
+    category = target_metadata.get("category_id", target_metadata.get("categoryId"))
+    if category is None:
+        category = os.getenv("YT_LONG_CATEGORY_ID", "27") if kind == "long" else "22"
+    category = str(category)
     if not category.isdigit():
         raise PreflightError("YT_LONG_CATEGORY_ID must be a YouTube numeric category ID")
     body = {
-        "snippet": {"title": caption["title"][:100], "description": caption["youtube"][:5000], "categoryId": category},
+        "snippet": {"title": str(target_metadata.get("title") or caption["title"])[:100],
+                    "description": str(target_metadata.get("description") or caption["youtube"])[:5000], "categoryId": category},
         "status": status,
     }
     media = MediaFileUpload(str(video), mimetype="video/mp4", resumable=True, chunksize=8 * 1024 * 1024)
