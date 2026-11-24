@@ -225,6 +225,18 @@ To activate either TikTok mode, also change `PLATFORMS=facebook,youtube,tiktok`.
 
 Supported actions: `sleep`, `tap_text`, `tap_desc`, `tap_xy`, `set_text`, `assert_text`, `publish_text`. `set_text` supports `{caption}` interpolation. ADB pushes media to `/sdcard/Movies/AutoPublisher/`, opens TikTok, then plays the calibrated macro. If a selector is missing, the macro stops and saves a debug screenshot.
 
+## Offline preflight before enabling automatic posting
+
+Run `python publisher.py doctor` to examine local folder paths, ffmpeg binaries, configured targets, OAuth file presence, basic manifest JSON structure, and Facebook's public-post safety flag. It makes **no network calls**, does not refresh OAuth or upload video, never prints secrets, and does not touch SQLite. Warnings in normal mode are informational.
+
+Run `python doctor.py --strict` for a readiness check that exits nonzero when required settings/files are missing, or live publishing is still disabled. **Passing this check does not prove token validity or remote publication.** Test actual platform permissions only with owner approval.
+
+```bash
+python publisher.py doctor
+python doctor.py --strict
+python publisher.py preview --stream long
+```
+
 ## Run safely
 
 Copy one video into the inbox, then:

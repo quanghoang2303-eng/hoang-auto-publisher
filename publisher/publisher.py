@@ -650,9 +650,12 @@ def preview(con: sqlite3.Connection, kind: str = "short"):
 
 def main():
     parser = argparse.ArgumentParser(description="MacBook: separate full-episode and short-highlight publisher")
-    parser.add_argument("command", choices=("scan", "preview", "tick", "run-now", "status", "authorize-youtube", "adb-inspect"))
+    parser.add_argument("command", choices=("scan", "preview", "tick", "run-now", "status", "authorize-youtube", "adb-inspect", "doctor"))
     parser.add_argument("--stream", choices=STREAMS, default="short", help="For preview/run-now only (default: short)")
     args = parser.parse_args()
+    if args.command == "doctor":
+        from doctor import main as doctor_main
+        return doctor_main([])
     if args.command == "authorize-youtube":
         backends.youtube_client(interactive=True)
         print("YouTube OAuth authorized; token.json created")
