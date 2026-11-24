@@ -176,6 +176,26 @@ Without an API key, captions are derived from the filename or `.txt`, not semant
 
 ## TikTok options
 
+### Recommended for personal workflow: automatic preparation, manual Studio scheduling
+
+TikTok's official Direct Post guidelines exclude utilities built solely for the owner's or team's accounts. For this local personal publisher, use `TIKTOK_MODE=manual` instead of assuming that API approval or unattended Android posting is available.
+
+Set `PLATFORMS=facebook,youtube,tiktok` and `TIKTOK_MODE=manual` when ready to include highlights. Keep full episodes restricted to Facebook and YouTube. On each approved short dispatch, the scheduler creates a deterministic local package under `state/tiktok_outbox/dispatch-XXXXXXXX/` with `video.mp4`, `caption.txt` and `review.json` (including the AI-generated-content flag, if supplied). The shared scheduler still requires `ENABLE_LIVE_POSTING=true` and may publish to other configured platforms; use normal preview first. No TikTok network calls, uploads or button presses occur in manual mode. A package is `awaiting_manual`, not published.
+
+Open TikTok Studio (https://www.tiktok.com/tiktokstudio), review the package, select your account, privacy, disclosures (including AI-generated content where appropriate), and manually publish or schedule using the available native features. Once the actual video is visible, record the owner's confirmation:
+
+```bash
+python publisher.py tiktok-confirm --dispatch-id 123 --permalink 'https://www.tiktok.com/@account/video/123456789'
+```
+
+`published_manual` means the owner recorded the real permalink; the app has not verified it with TikTok. Repeated confirmation with the same URL is safe; a different URL or reuse across jobs is rejected. Existing review packages are immutable to avoid accidental duplicates. Do not delete one after an ambiguous publish without checking TikTok Studio. Files in the default state directory are ignored by Git. If you change the outbox directory, use a local folder outside the repo.
+
+The older Android macro is retained for inspection/legacy reference, but the scheduler no longer executes its unattended publication action. Direct Post is reserved for genuinely eligible reviewed applications with compliant UI; a config flag alone is not approval.
+
+Official guidelines: https://developers.tiktok.com/docs/en/content-sharing-guidelines
+
+
+
 ### Mode 1: Official Direct Post API (only if your case qualifies)
 
 TikTok Direct Post needs an approved app, `video.publish`, a TikTok OAuth user token, and a user-compliant UX (account identity, preview, privacy selection, interaction settings, disclosure, express consent). This command-line MVP is **not a ready-to-submit compliant TikTok developer app**. Don't enable it solely to bypass TikTok's review process.
@@ -210,7 +230,7 @@ Official references:
 - https://developers.tiktok.com/docs/en/content-sharing-guidelines
 - https://developers.tiktok.com/docs/en/content-posting-api-reference-direct-post
 
-### Mode 2: Android ADB prototype (UI experimental)
+### Legacy Android ADB prototype (diagnostics only; live publishing disabled)
 
 If you deliberately choose TikTok UI automation for your own device, test it thoroughly and respect TikTok account restrictions. No app-private data extraction or bypassing security challenges is included.
 
@@ -221,7 +241,7 @@ If you deliberately choose TikTok UI automation for your own device, test it tho
 5. A valid final macro must have an `assert_text` guard before a final `{"action":"publish_text","text":"Post"}` step. For a Vietnamese interface that may be `Đăng`. Test on a private/throwaway account before trusting it with public posts.
 6. Only after successful manual checks set `ADB_MACRO_APPROVED=true` in `.env`. ADB publication returns `submitted_unverified` because button taps cannot reliably confirm that a post is publicly visible.
 
-To activate either TikTok mode, also change `PLATFORMS=facebook,youtube,tiktok`. The safe default excludes TikTok until it is configured.
+To enable manual review or an eligible API integration, change `PLATFORMS=facebook,youtube,tiktok`. ADB posting is disabled in the scheduler. The safe default excludes TikTok.
 
 Supported actions: `sleep`, `tap_text`, `tap_desc`, `tap_xy`, `set_text`, `assert_text`, `publish_text`. `set_text` supports `{caption}` interpolation. ADB pushes media to `/sdcard/Movies/AutoPublisher/`, opens TikTok, then plays the calibrated macro. If a selector is missing, the macro stops and saves a debug screenshot.
 
@@ -286,7 +306,9 @@ Logs: `state/scheduler.log`, `state/scheduler_error.log`; database: `state/publi
 | `inflight` | Upload started | If app crashed, **manually reconcile** before retry |
 | `submitted` | API accepted | Check visibility/processing; TikTok API polled |
 | `published` | TikTok reports PUBLISH_COMPLETE | Done |
-| `submitted_unverified` | ADB macro ran | Check TikTok profile |
+| `submitted_unverified` | Legacy ADB macro ran | Check TikTok profile |
+| `awaiting_manual` | TikTok package prepared locally | Review and publish/schedule in Studio |
+| `published_manual` | Owner confirmed TikTok permalink | Not independently API verified |
 | `needs_check` | Uncertain after a remote call | Check platform; do not blindly retry |
 | `failed` | TikTok reported failure | Check reason; retry only after investigation |
 

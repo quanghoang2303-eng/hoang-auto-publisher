@@ -516,13 +516,15 @@ def publish_pending(con: sqlite3.Connection, kind: str | None = None):
                     if os.getenv("TIKTOK_APP_APPROVED", "false").lower() != "true":
                         raise backends.PreflightError("TikTok app not audited/approved")
                     callback = lambda: backends.tiktok_api_publish(path, caption, metadata)
+                elif mode == "manual":
+                    if p["kind"] != "short":
+                        raise backends.PreflightError("TikTok review is restricted to highlights")
+                    from tiktok_outbox import prepare
+                    callback = lambda: prepare(path, caption, metadata, p["dispatch_id"], p["fingerprint"])
                 elif mode == "adb":
-                    from tiktok_adb import publish as adb_publish
-                    from tiktok_adb import validate_macro
-                    validate_macro()
-                    callback = lambda: adb_publish(path, caption["tiktok"])
+                    raise backends.PreflightError("ADB unattended publishing is disabled; use TIKTOK_MODE=manual")
                 else:
-                    raise backends.PreflightError("TIKTOK_MODE is off; choose API or calibrated ADB")
+                    raise backends.PreflightError("TIKTOK_MODE is off; choose manual review or an eligible API")
         except backends.PreflightError as exc:
             post_update(con, p["dispatch_id"], platform, "blocked", error=str(exc))
             print(f"BLOCKED {platform}: {exc}")
@@ -611,7 +613,7 @@ def reconcile(con: sqlite3.Connection):
                             error=outcome if state == "failed" else None)
                 send_notice(f"TikTok {state}: {outcome}")
         except Exception as exc:
-            print(f"TikTok reconciliation temporarily failed: {exc}")
+            print(f"TikTok reconciliation temporarily failed: {redact_error(exc)}")
 
 
 def report(con: sqlite3.Connection):
@@ -651,9 +653,19 @@ def preview(con: sqlite3.Connection, kind: str = "short"):
 
 def main():
     parser = argparse.ArgumentParser(description="MacBook: separate full-episode and short-highlight publisher")
-    parser.add_argument("command", choices=("scan", "preview", "tick", "run-now", "status", "authorize-youtube", "adb-inspect", "doctor"))
+    parser.add_argument("command", choices=("scan", "preview", "tick", "run-now", "status", "authorize-youtube", "adb-inspect", "doctor", "tiktok-confirm"))
     parser.add_argument("--stream", choices=STREAMS, default="short", help="For preview/run-now only (default: short)")
+    parser.add_argument("--dispatch-id", type=int, help="TikTok manual job ID")
+    parser.add_argument("--permalink", help="Actual TikTok video permalink after publication")
     args = parser.parse_args()
+    if args.command == "tiktok-confirm":
+        if not args.dispatch_id or not args.permalink:
+            parser.error("tiktok-confirm requires --dispatch-id and --permalink")
+        from tiktok_outbox import confirm
+        with exclusive_lock(), db() as con:
+            confirm(con, args.dispatch_id, args.permalink)
+        print("TikTok publication manually confirmed (not API verified)")
+        return
     if args.command == "doctor":
         from doctor import main as doctor_main
         return doctor_main([])

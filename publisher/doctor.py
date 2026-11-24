@@ -132,12 +132,18 @@ def report(config: Mapping[str, str], root: Path = ROOT, *, strict: bool = False
                 add("OK", privacy, v)
     if "tiktok" in selected:
         mode = config.get("TIKTOK_MODE", "off").lower()
-        if mode not in {"api", "adb"}:
-            missing("TIKTOK_MODE", "TikTok target selected but mode is disabled/invalid")
+        if mode == "manual":
+            add("OK", "TikTok manual", "Local review package; owner publishes or schedules in TikTok Studio")
         elif mode == "adb":
-            add("WARN", "TikTok ADB", "UI automation is experimental; no guarantee of publication")
+            add("FAIL", "TikTok ADB", "Unattended UI posting disabled; use manual mode")
+        elif mode == "api":
+            for key in ("TIKTOK_ACCESS_TOKEN", "TIKTOK_APP_APPROVED"):
+                valid = bool(config.get(key, "").strip()) if key.endswith("TOKEN") else config.get(key, "").lower() == "true"
+                if not valid:
+                    missing(key, "Eligible reviewed client and local credentials required")
+            add("WARN", "TikTok API", "Only for an eligible reviewed app with compliant per-video UX/consent")
         else:
-            add("WARN", "TikTok API", "Requires approved developer app and per-video compliant consent")
+            missing("TIKTOK_MODE", "TikTok target selected but mode is disabled/invalid")
 
     manifest = (config.get("PUBLISH_MANIFEST") or "").strip()
     if manifest:
