@@ -28,6 +28,8 @@ def checked(response: requests.Response) -> dict:
 
 def facebook_publish(video: Path, caption: dict) -> tuple[str, str]:
     """Page Reels: START -> upload binary -> FINISH. Accepted != publicly visible."""
+    if os.getenv("FB_ALLOW_PUBLIC_POSTING", "false").lower() != "true":
+        raise PreflightError("Set FB_ALLOW_PUBLIC_POSTING=true to allow public Facebook Page posts")
     token, page = required("FB_PAGE_ACCESS_TOKEN"), required("FB_PAGE_ID")
     version = os.getenv("FB_GRAPH_VERSION", "v27.0")
     endpoint = f"https://graph.facebook.com/{version}/{page}/video_reels"
@@ -54,19 +56,24 @@ def facebook_publish(video: Path, caption: dict) -> tuple[str, str]:
     return "submitted", str(finish.get("post_id") or video_id)
 
 
-def facebook_video_preflight(video: Path) -> None:
-    """Fail before marking an upload inflight when it is clearly too large."""
+def facebook_video_preflight(video: Path, duration_seconds: float | None = None) -> None:
+    """Validate configurable Page Video size and duration limits before network calls."""
     try:
         max_bytes = int(os.getenv("FB_FULL_MAX_BYTES", "1000000000"))
     except ValueError as exc:
         raise PreflightError("FB_FULL_MAX_BYTES must be a positive integer") from exc
     if max_bytes < 1:
         raise PreflightError("FB_FULL_MAX_BYTES must be a positive integer")
+    try:
+        max_seconds = int(os.getenv("FB_FULL_MAX_DURATION_SECONDS", "43200"))
+    except ValueError as exc:
+        raise PreflightError("FB_FULL_MAX_DURATION_SECONDS must be a positive integer") from exc
+    if max_bytes < 1 or max_seconds < 1:
+        raise PreflightError("Facebook full-video limits must be positive integers")
+    if duration_seconds is not None and duration_seconds > max_seconds:
+        raise PreflightError(f"Full episode exceeds Facebook duration limit {max_seconds} seconds")
     if video.stat().st_size > max_bytes:
-        raise PreflightError(
-            f"Full episode exceeds Facebook multipart safety limit {max_bytes} bytes; "
-            "compress it or implement resumable upload before publishing"
-        )
+        raise PreflightError(f"Full episode exceeds Facebook safety limit {max_bytes} bytes")
 
 
 def facebook_video_status(video_id: str) -> str:
@@ -91,16 +98,14 @@ def facebook_video_status(video_id: str) -> str:
         return "published"
     return "submitted"
 
-def facebook_video_publish(video: Path, caption: dict, metadata: dict | None = None) -> tuple[str, str]:
-    """Upload a full episode using Meta's Page Videos endpoint (not the Reels upload phase).
-
-    This conservative MVP supports multipart uploads up to a configurable size limit.
-    If the HTTP result is uncertain, publisher.py marks it needs_check; it NEVER retries
-    publication blindly. Meta may present all Facebook videos in its Reels experience.
-    """
+def facebook_video_publish(video: Path, caption: dict, metadata: dict | None = None,
+                           upload_state: dict | None = None, save_state=None) -> tuple[str, str]:
+    """Resumable Page Videos transfer. Session/offset are checkpointed after each chunk."""
     token, page = required("FB_PAGE_ACCESS_TOKEN"), required("FB_PAGE_ID")
     version = os.getenv("FB_GRAPH_VERSION", "v27.0")
-    facebook_video_preflight(video)
+    facebook_video_preflight(video, (metadata or {}).get("duration_seconds"))
+    if os.getenv("FB_ALLOW_PUBLIC_POSTING", "false").lower() != "true":
+        raise PreflightError("Set FB_ALLOW_PUBLIC_POSTING=true to allow public Facebook Page posts")
     title = str(caption.get("facebook_title") or caption["title"]).strip()[:255]
     description = str(caption.get("facebook") or caption["youtube"]).strip()
     if not title or not description:
@@ -112,27 +117,47 @@ def facebook_video_publish(video: Path, caption: dict, metadata: dict | None = N
     if host not in {"graph.facebook.com", "graph-video.facebook.com"}:
         raise PreflightError("FB_VIDEO_UPLOAD_HOST must be a recognized Meta Graph host")
     url = f"https://{host}/{version}/{page}/videos"
-    # requests.post(files=...) buffers the ENTIRE video into RAM. Use
-    # requests-toolbelt MultipartEncoder to stream the file in bounded memory.
-    # No implicit retries: a timeout can mean Facebook has already accepted it.
-    from requests_toolbelt.multipart.encoder import MultipartEncoder
-
+    state = upload_state or {}
+    chunk_size = int(os.getenv("FB_UPLOAD_CHUNK_BYTES", str(8 * 1024 * 1024)))
+    if chunk_size < 1:
+        raise PreflightError("FB_UPLOAD_CHUNK_BYTES must be a positive integer")
+    session_id = state.get("session_id")
+    offset = int(state.get("offset", 0))
+    if not session_id:
+        started = checked(requests.post(url, data={"access_token": token, "upload_phase": "start",
+            "file_size": str(video.stat().st_size)}, timeout=30))
+        session_id = str(started.get("upload_session_id", ""))
+        video_id = str(started.get("video_id", "")) or None
+        offset = int(started.get("start_offset", 0))
+        if not session_id:
+            raise RuntimeError("Facebook did not return an upload session; check remotely before retry")
+        if save_state:
+            save_state(session_id, offset, video_id)
+    else:
+        video_id = state.get("video_id")
+    size = video.stat().st_size
     with video.open("rb") as handle:
-        form = MultipartEncoder(fields={
-            "access_token": token, "title": title,
-            "description": description[:60000], "published": "true",
-            "source": (video.name, handle, "video/mp4"),
-        })
-        response = requests.post(
-            url,
-            data=form,
-            headers={"Content-Type": form.content_type},
-            timeout=(30, 1800),
-        )
-    result = checked(response)
-    video_id = result.get("id") or result.get("video_id")
+        while offset < size:
+            handle.seek(offset)
+            payload = handle.read(min(chunk_size, size - offset))
+            response = requests.post(url, data={"access_token": token, "upload_phase": "transfer",
+                "upload_session_id": session_id, "start_offset": str(offset), "video_file_chunk": payload},
+                timeout=(30, 600))
+            result = checked(response)
+            next_offset = int(result.get("start_offset", offset + len(payload)))
+            if next_offset <= offset:
+                raise RuntimeError("Facebook returned a non-advancing upload offset")
+            offset = next_offset
+            if save_state:
+                save_state(session_id, offset)
+    finish = checked(requests.post(url, data={"access_token": token, "upload_phase": "finish",
+        "upload_session_id": session_id, "title": title, "description": description[:60000],
+        "published": "true"}, timeout=60))
+    video_id = finish.get("video_id") or finish.get("id") or video_id
     if not video_id:
-        raise RuntimeError("Facebook Page Videos returned no video ID; check remotely before retry")
+        raise RuntimeError("Facebook finish response has no video ID; check remotely before retry")
+    if save_state:
+        save_state(session_id, size, str(video_id))
     return "submitted", str(video_id)
 
 
@@ -205,6 +230,22 @@ def youtube_publish(video: Path, caption: dict, kind: str = "short", metadata: d
         # still move to needs_check; never blindly create a second remote video.
         _, result = request.next_chunk(num_retries=3)
     return "submitted", result["id"]
+
+
+def youtube_video_status(video_id: str) -> str:
+    youtube = youtube_client()
+    data = youtube.videos().list(part="status,processingDetails", id=video_id).execute()
+    items = data.get("items", [])
+    if not items:
+        return "submitted"
+    item = items[0]
+    processing = item.get("processingDetails", {}).get("processingStatus", "")
+    upload = item.get("status", {}).get("uploadStatus", "")
+    if upload in {"failed", "rejected", "deleted"} or processing == "failed":
+        return "failed"
+    if upload == "processed" and processing in {"succeeded", ""} and item.get("status", {}).get("privacyStatus") != "private":
+        return "published"
+    return "submitted"
 
 
 def _tiktok_json(url: str, body: dict) -> dict:

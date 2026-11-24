@@ -66,7 +66,14 @@ def exclusive_lock():
 
 
 def db() -> sqlite3.Connection:
-    con = sqlite3.connect(DATABASE)
+    class ClosingConnection(sqlite3.Connection):
+        def __exit__(self, exc_type, exc, tb):
+            try:
+                return super().__exit__(exc_type, exc, tb)
+            finally:
+                self.close()
+
+    con = sqlite3.connect(DATABASE, factory=ClosingConnection)
     con.row_factory = sqlite3.Row
     con.executescript("""
         PRAGMA foreign_keys=ON;
@@ -96,6 +103,10 @@ def db() -> sqlite3.Connection:
     ):
         if column not in current:
             con.execute(f"ALTER TABLE videos ADD COLUMN {column} {definition}")
+    post_columns = {row[1] for row in con.execute("PRAGMA table_info(posts)")}
+    for column, definition in (("upload_session", "TEXT"), ("upload_offset", "INTEGER NOT NULL DEFAULT 0")):
+        if column not in post_columns:
+            con.execute(f"ALTER TABLE posts ADD COLUMN {column} {definition}")
     con.commit()
     return con
 
@@ -154,6 +165,7 @@ def scan(con: sqlite3.Connection) -> int:
             raise ValueError("FULL_VIDEO_DIR / YT_LONG_VIDEO_DIR must differ from VIDEO_DIR")
         folders.append(("long", long_folder))
     minimum_age = int(os.getenv("MIN_FILE_AGE_SECONDS", "60"))
+    manifest = configured_manifest()
     found = 0
     for kind, folder in folders:
         folder.mkdir(parents=True, exist_ok=True)
@@ -167,6 +179,10 @@ def scan(con: sqlite3.Connection) -> int:
             if latest and latest["file_size"] == stat.st_size and latest["mtime_ns"] == stat.st_mtime_ns:
                 continue
             try:
+                if manifest is not None:
+                    if video.name not in manifest:
+                        raise ValueError("missing manifest entry")
+                    validate_manifest_entry(manifest[video.name], kind, video.name)
                 validate(video, kind)
                 fingerprint = file_fingerprint(video)
             except (ValueError, OSError, subprocess.SubprocessError, KeyError, IndexError) as exc:
@@ -295,6 +311,41 @@ def platforms(kind: str = "short") -> list[str]:
     return result
 
 
+def validate_manifest_entry(entry: dict, kind: str, filename: str) -> dict:
+    if not isinstance(entry, dict) or entry.get("kind") != kind or entry.get("media_filename") != filename:
+        raise ValueError(f"Manifest stream or media filename mismatch for {filename}")
+    if not isinstance(entry.get("episode_id"), str) or not entry["episode_id"].strip():
+        raise ValueError(f"Manifest entry for {filename} needs episode_id")
+    targets = entry.get("allowed_targets")
+    allowed = {"facebook", "youtube"} if kind == "long" else set(TARGETS)
+    if not isinstance(targets, list) or not targets or len(targets) != len(set(targets)) or not set(targets) <= allowed:
+        raise ValueError(f"Manifest allowed_targets invalid for {filename}")
+    platform_metadata = entry.get("platform_metadata")
+    if not isinstance(platform_metadata, dict) or set(platform_metadata) != set(targets) or any(
+            not isinstance(platform_metadata[target], dict) or not platform_metadata[target] for target in targets):
+        raise ValueError(f"Manifest platform_metadata must define metadata for every allowed target of {filename}")
+    return entry
+
+
+def configured_manifest() -> dict[str, dict] | None:
+    value = os.getenv("PUBLISH_MANIFEST", "").strip()
+    if not value:
+        return None
+    raw = json.loads(Path(value).expanduser().read_text(encoding="utf-8"))
+    entries = raw.get("videos") if isinstance(raw, dict) else None
+    if not isinstance(entries, list):
+        raise ValueError("Manifest must be a JSON object with a videos array")
+    result = {}
+    for item in entries:
+        if not isinstance(item, dict) or not isinstance(item.get("media_filename"), str):
+            raise ValueError("Every manifest item needs media_filename")
+        filename = item["media_filename"]
+        if filename in result:
+            raise ValueError(f"Duplicate manifest media_filename: {filename}")
+        result[filename] = item
+    return result
+
+
 def long_post_days() -> set[int]:
     value = long_setting("FULL_POST_DAYS", "YT_LONG_POST_DAYS", "")
     if not value:
@@ -345,6 +396,16 @@ def create_dispatch(con: sqlite3.Connection, key: str, now: datetime, kind: str 
         return
     info = validate(path, kind)
     metadata = read_metadata(path)
+    manifest = configured_manifest()
+    if manifest is not None:
+        if path.name not in manifest:
+            raise ValueError(f"No manifest entry for {path.name}")
+        entry = validate_manifest_entry(manifest[path.name], kind, path.name)
+        if set(entry["allowed_targets"]) != set(platforms(kind)):
+            raise ValueError(f"Manifest targets do not match configured platforms for {path.name}")
+        metadata["episode_id"] = entry["episode_id"]
+        metadata["allowed_targets"] = entry["allowed_targets"]
+        metadata["manifest_platform_metadata"] = entry["platform_metadata"]
     metadata["duration_seconds"] = info["duration_seconds"]
     captions = make_caption(path, info, kind)
     con.execute("INSERT INTO dispatches(slot_key,video_id,day,caption_json,metadata_json,created_at) VALUES (?,?,?,?,?,?)",
@@ -363,6 +424,14 @@ def post_update(con: sqlite3.Connection, dispatch_id: int, platform: str,
     con.execute("UPDATE posts SET status=?,remote_id=COALESCE(?,remote_id),error=?,updated_at=? "
                 "WHERE dispatch_id=? AND platform=?",
                 (status, remote_id, error, localnow().isoformat(), dispatch_id, platform))
+    con.commit()
+
+
+def save_facebook_upload(con: sqlite3.Connection, dispatch_id: int, session_id: str,
+                         offset: int, video_id: str | None = None):
+    con.execute("UPDATE posts SET upload_session=?,upload_offset=?,remote_id=COALESCE(?,remote_id),updated_at=? "
+                "WHERE dispatch_id=? AND platform='facebook'",
+                (session_id, offset, video_id, localnow().isoformat(), dispatch_id))
     con.commit()
 
 
@@ -408,11 +477,16 @@ def publish_pending(con: sqlite3.Connection, kind: str | None = None):
             if platform == "facebook":
                 backends.required("FB_PAGE_ID")
                 backends.required("FB_PAGE_ACCESS_TOKEN")
+                if os.getenv("FB_ALLOW_PUBLIC_POSTING", "false").lower() != "true":
+                    raise backends.PreflightError("Set FB_ALLOW_PUBLIC_POSTING=true to allow public Facebook Page posts")
                 # Keep the original Page Reels endpoint for highlights; send full episodes
                 # through the Page Videos endpoint. Meta may display all videos as Reels.
                 if p["kind"] == "long":
-                    backends.facebook_video_preflight(path)
-                    callback = lambda: backends.facebook_video_publish(path, caption, metadata)
+                    backends.facebook_video_preflight(path, metadata.get("duration_seconds"))
+                    callback = lambda: backends.facebook_video_publish(path, caption, metadata,
+                        {"session_id": p["upload_session"], "offset": p["upload_offset"], "video_id": p["remote_id"]},
+                        lambda session, offset, video_id=None: save_facebook_upload(
+                            con, p["dispatch_id"], session, offset, video_id))
                 else:
                     callback = lambda: backends.facebook_publish(path, caption)
             elif platform == "youtube":
@@ -453,7 +527,16 @@ def publish_pending(con: sqlite3.Connection, kind: str | None = None):
 
 
 def quarantine_interrupted_uploads(con: sqlite3.Connection):
-    # A previous process may have uploaded remotely before exiting unexpectedly.
+    # Resume only a known Page Video session with bytes remaining. A session at EOF
+    # may have completed FINISH remotely, so it must be reconciled manually.
+    columns = {row[1] for row in con.execute("PRAGMA table_info(posts)")}
+    if {"platform", "upload_session", "upload_offset", "dispatch_id"} <= columns:
+        con.execute("""
+            UPDATE posts SET status='queued',error=NULL,updated_at=?
+            WHERE status='inflight' AND platform='facebook' AND upload_session IS NOT NULL
+              AND upload_offset < COALESCE((SELECT v.file_size FROM dispatches d JOIN videos v ON v.id=d.video_id
+                  WHERE d.id=posts.dispatch_id),0)
+        """, (localnow().isoformat(),))
     con.execute("""
         UPDATE posts SET status='needs_check',error='Mac process interrupted during remote upload; reconcile manually',
           updated_at=? WHERE status='inflight'
@@ -467,7 +550,7 @@ def reconcile(con: sqlite3.Connection):
     fb_rows = con.execute("""SELECT p.* FROM posts p
         JOIN dispatches d ON p.dispatch_id=d.id
         JOIN videos v ON d.video_id=v.id
-        WHERE v.kind='long' AND p.platform='facebook' AND p.status='submitted'
+        WHERE v.kind='long' AND p.platform='facebook' AND p.status IN ('submitted','needs_check')
               AND p.remote_id IS NOT NULL""").fetchall()
     for item in fb_rows:
         try:
@@ -478,6 +561,16 @@ def reconcile(con: sqlite3.Connection):
         except Exception as exc:
             # A temporary permission/status error must not change the submission state.
             print(f"Facebook full episode status check failed: {redact_error(exc)}")
+
+    yt_rows = con.execute("SELECT * FROM posts WHERE platform='youtube' AND status='submitted' AND remote_id IS NOT NULL").fetchall()
+    for item in yt_rows:
+        try:
+            status = backends.youtube_video_status(item["remote_id"])
+            if status in ("published", "failed"):
+                post_update(con, item["dispatch_id"], "youtube", status)
+                send_notice(f"YouTube {status}: video={item['remote_id']}")
+        except Exception as exc:
+            print(f"YouTube status check failed: {redact_error(exc)}")
 
     if os.getenv("TIKTOK_MODE", "off") != "api":
         return

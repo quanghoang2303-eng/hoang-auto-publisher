@@ -112,6 +112,44 @@ class PublisherTests(unittest.TestCase):
                 self.assertEqual(tuple(row), ("short", "oldhash"))
                 self.assertIn("kind", [col[1] for col in connection.execute("PRAGMA table_info(videos)")])
                 self.assertIn("mtime_ns", [col[1] for col in connection.execute("PRAGMA table_info(videos)")])
+                self.assertIn("upload_session", [col[1] for col in connection.execute("PRAGMA table_info(posts)")])
+                self.assertIn("upload_offset", [col[1] for col in connection.execute("PRAGMA table_info(posts)")])
+            self.assertIsNotNone(connection)
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
+
+    def test_manifest_rejects_stream_or_target_mismatch(self):
+        entry = {"kind":"long", "media_filename":"episode.mp4", "episode_id":"ep-1",
+                 "allowed_targets":["youtube"], "platform_metadata":{"youtube":{"category":"27"}}}
+        self.assertEqual(publisher.validate_manifest_entry(entry, "long", "episode.mp4"), entry)
+        with self.assertRaisesRegex(ValueError, "mismatch"):
+            publisher.validate_manifest_entry(entry, "short", "episode.mp4")
+        entry["platform_metadata"] = {}
+        with self.assertRaisesRegex(ValueError, "platform_metadata"):
+            publisher.validate_manifest_entry(entry, "long", "episode.mp4")
+
+    def test_quarantine_resumes_known_partial_session_only(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(publisher, "DATABASE", Path(folder)/"db.sqlite3"):
+            with publisher.db() as con:
+                con.execute("INSERT INTO videos(fingerprint,path,title_hint,created_at,kind,file_size) VALUES ('h','x','x','now','long',100)")
+                con.execute("INSERT INTO dispatches(slot_key,video_id,day,caption_json,metadata_json,created_at) VALUES ('k',1,'d','{}','{}','now')")
+                con.execute("INSERT INTO posts(dispatch_id,platform,status,upload_session,upload_offset,updated_at) VALUES (1,'facebook','inflight','sess',40,'now')")
+                con.execute("INSERT INTO posts(dispatch_id,platform,status,upload_session,upload_offset,updated_at) VALUES (1,'youtube','inflight',NULL,0,'now')")
+                publisher.quarantine_interrupted_uploads(con)
+                statuses = dict((r["platform"],r["status"]) for r in con.execute("SELECT platform,status FROM posts"))
+                self.assertEqual(statuses, {"facebook":"queued", "youtube":"needs_check"})
+
+    def test_youtube_processed_private_video_is_not_reported_published(self):
+        class FakeVideos:
+            def list(self, **kwargs):
+                return self
+            def execute(self):
+                return {"items":[{"status":{"uploadStatus":"processed","privacyStatus":"private"},
+                                  "processingDetails":{"processingStatus":"succeeded"}}]}
+        class FakeClient:
+            def videos(self): return FakeVideos()
+        with patch.object(backends, "youtube_client", return_value=FakeClient()):
+            self.assertEqual(backends.youtube_video_status("yt-private"), "submitted")
 
     def test_rescan_skips_unchanged_large_file_and_requeues_replacement(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -308,44 +346,30 @@ class PublisherTests(unittest.TestCase):
             self.assertEqual(captions["facebook"], "Nội dung Facebook riêng")
             self.assertNotIn("#Shorts", captions["facebook"])
 
-    def test_v3_facebook_video_upload_uses_page_videos_not_reels(self):
-        video = None
+    def test_v3_facebook_video_upload_is_resumable_and_chunked(self):
         with tempfile.TemporaryDirectory() as folder:
             video = Path(folder) / "episode.mp4"
             video.write_bytes(b"1234567890")
             class Response:
-                def raise_for_status(self):
-                    return None
-                def json(self):
-                    return {"id": "fb-episode-42"}
-            class Encoder:
-                content_type = "multipart/form-data; boundary=test"
-                def __init__(self, fields):
-                    self.fields = fields
-            fake_toolbelt = types.ModuleType("requests_toolbelt")
-            fake_multipart = types.ModuleType("requests_toolbelt.multipart")
-            fake_encoder = types.ModuleType("requests_toolbelt.multipart.encoder")
-            fake_encoder.MultipartEncoder = Encoder
-            with patch.dict(sys.modules, {
-                "requests_toolbelt": fake_toolbelt,
-                "requests_toolbelt.multipart": fake_multipart,
-                "requests_toolbelt.multipart.encoder": fake_encoder,
-            }), patch.dict(os.environ, {
-                "FB_PAGE_ACCESS_TOKEN": "fake-private-token", "FB_PAGE_ID": "12345",
-                "FB_GRAPH_VERSION": "v27.0", "FB_FULL_MAX_BYTES": "1000",
-            }), patch.object(backends.requests, "post", return_value=Response()) as request:
-                status, ident = backends.facebook_video_publish(video, {
-                    "title": "YouTube title", "facebook_title": "Facebook title",
-                    "youtube": "YouTube description", "facebook": "Facebook description",
-                })
+                def __init__(self, body): self.body = body
+                def raise_for_status(self): pass
+                def json(self): return self.body
+            replies = [Response({"upload_session_id":"sess1","video_id":"fb-episode-42","start_offset":"0"}),
+                       Response({"start_offset":"4"}), Response({"start_offset":"8"}), Response({"start_offset":"10"}),
+                       Response({"video_id":"fb-episode-42"})]
+            saved = []
+            with patch.dict(os.environ, {"FB_PAGE_ACCESS_TOKEN":"fake-private-token", "FB_PAGE_ID":"12345",
+                    "FB_GRAPH_VERSION":"v27.0", "FB_FULL_MAX_BYTES":"1000", "FB_ALLOW_PUBLIC_POSTING":"true",
+                    "FB_UPLOAD_CHUNK_BYTES":"4"}), patch.object(backends.requests, "post", side_effect=replies) as request:
+                status, ident = backends.facebook_video_publish(video,
+                    {"title":"YouTube title", "facebook_title":"Facebook title", "youtube":"YouTube description", "facebook":"Facebook description"},
+                    upload_state={}, save_state=lambda session, offset, video_id=None: saved.append((session,offset,video_id)))
             self.assertEqual((status, ident), ("submitted", "fb-episode-42"))
-            self.assertEqual(request.call_count, 1)
-            args, kwargs = request.call_args
-            self.assertEqual(args[0], "https://graph.facebook.com/v27.0/12345/videos")
-            self.assertEqual(kwargs["data"].fields["title"], "Facebook title")
-            self.assertEqual(kwargs["data"].fields["description"], "Facebook description")
-            self.assertEqual(kwargs["data"].fields["published"], "true")
-            self.assertEqual(kwargs["data"].fields["source"][0], "episode.mp4")
+            self.assertEqual(request.call_count, 5)
+            self.assertEqual(request.call_args_list[0].kwargs["data"]["upload_phase"], "start")
+            self.assertEqual([call.kwargs["data"]["start_offset"] for call in request.call_args_list[1:3]], ["0", "4"])
+            self.assertEqual(request.call_args_list[-1].kwargs["data"]["upload_phase"], "finish")
+            self.assertEqual(saved[-1], ("sess1", 10, "fb-episode-42"))
 
     def test_v3_facebook_video_upload_rejects_large_file_before_api(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -366,7 +390,7 @@ class PublisherTests(unittest.TestCase):
             with patch.object(publisher, "DATABASE", root / "db.sqlite3"), \
                  patch.object(publisher, "validate", return_value={"duration_seconds": 480}), \
                  patch.dict(os.environ, {"FULL_PLATFORMS": "facebook,youtube", "FB_PAGE_ID": "testpage",
-                                      "FB_PAGE_ACCESS_TOKEN": "fake-token", "FULL_MAX_DAILY_POSTS": "1"}):
+                                      "FB_PAGE_ACCESS_TOKEN": "fake-token", "FB_ALLOW_PUBLIC_POSTING": "true", "FULL_MAX_DAILY_POSTS": "1"}):
                 with publisher.db() as con:
                     con.execute("INSERT INTO videos(fingerprint,path,title_hint,created_at,kind) VALUES (?,?,?,?,?)",
                                 (publisher.file_fingerprint(episode), str(episode), "episode", "now", "long"))
@@ -393,7 +417,7 @@ class PublisherTests(unittest.TestCase):
             episode = root / "episode.mp4"
             episode.write_bytes(b"example")
             with patch.object(publisher, "DATABASE", root / "db.sqlite3"), \
-                 patch.dict(os.environ, {"FB_PAGE_ID": "123", "FB_PAGE_ACCESS_TOKEN": "fake"}):
+                 patch.dict(os.environ, {"FB_PAGE_ID": "123", "FB_PAGE_ACCESS_TOKEN": "fake", "FB_ALLOW_PUBLIC_POSTING": "true"}):
                 with publisher.db() as con:
                     con.execute("INSERT INTO videos(fingerprint,path,title_hint,created_at,kind) VALUES (?,?,?,?,?)",
                                 (publisher.file_fingerprint(episode), str(episode), "ep", "now", "long"))
@@ -442,7 +466,7 @@ class PublisherTests(unittest.TestCase):
             episode.write_bytes(b"0123456789")
             with patch.object(publisher, "DATABASE", root / "db.sqlite3"), \
                  patch.dict(os.environ, {"FB_PAGE_ID": "123", "FB_PAGE_ACCESS_TOKEN": "fake",
-                                      "FB_FULL_MAX_BYTES": "5"}):
+                                      "FB_FULL_MAX_BYTES": "5", "FB_ALLOW_PUBLIC_POSTING": "true"}):
                 with publisher.db() as con:
                     con.execute("INSERT INTO videos(fingerprint,path,title_hint,created_at,kind) VALUES (?,?,?,?,?)",
                                 (publisher.file_fingerprint(episode), str(episode), "ep", "now", "long"))
