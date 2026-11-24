@@ -137,10 +137,18 @@ def report(config: Mapping[str, str], root: Path = ROOT, *, strict: bool = False
         elif mode == "adb":
             add("FAIL", "TikTok ADB", "Unattended UI posting disabled; use manual mode")
         elif mode == "api":
-            for key in ("TIKTOK_ACCESS_TOKEN", "TIKTOK_APP_APPROVED"):
-                valid = bool(config.get(key, "").strip()) if key.endswith("TOKEN") else config.get(key, "").lower() == "true"
-                if not valid:
-                    missing(key, "Eligible reviewed client and local credentials required")
+            if config.get("TIKTOK_APP_APPROVED", "false").lower() != "true":
+                missing("TIKTOK_APP_APPROVED", "Actual eligibility/review/audit required; do not enable just to test")
+            token_path = local_path(config.get("TIKTOK_TOKEN_FILE", "state/tiktok_token.json"))
+            if token_path.is_file():
+                add("OK", "TIKTOK_TOKEN_FILE", "Local OAuth store exists; validity not checked")
+                for key in ("TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET"):
+                    if not config.get(key, "").strip():
+                        missing(key, "Required for OAuth token refresh")
+            elif config.get("TIKTOK_ACCESS_TOKEN", "").strip():
+                add("WARN", "TIKTOK_ACCESS_TOKEN", "Legacy user token configured; automatic refresh unavailable")
+            else:
+                missing("TIKTOK_TOKEN_FILE", "Authorize eligible app via Login Kit first")
             add("WARN", "TikTok API", "Only for an eligible reviewed app with compliant per-video UX/consent")
         else:
             missing("TIKTOK_MODE", "TikTok target selected but mode is disabled/invalid")

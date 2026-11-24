@@ -306,12 +306,24 @@ def youtube_video_status(video_id: str) -> str:
 
 
 def _tiktok_json(url: str, body: dict) -> dict:
-    token = required("TIKTOK_ACCESS_TOKEN")
-    result = checked(requests.post(f"https://open.tiktokapis.com{url}", json=body, headers={
-        "Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=UTF-8",
-    }, timeout=30))
-    if result.get("error", {}).get("code") != "ok":
-        raise RuntimeError(f"TikTok API error: {result.get('error')}")
+    from tiktok_oauth import access_token
+
+    token = access_token()
+    try:
+        response = requests.post(f"https://open.tiktokapis.com{url}", json=body, headers={
+            "Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=UTF-8",
+        }, timeout=30, allow_redirects=False)
+        response.raise_for_status()
+        if response.status_code != 200:
+            raise RuntimeError("Unexpected TikTok API HTTP response")
+        result = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError("TikTok API request failed; inspect account or reconcile existing publish ID") from exc
+    if not isinstance(result, dict) or result.get("error", {}).get("code") != "ok":
+        # Do not echo arbitrary API responses (may contain tokens or signed URLs).
+        raise RuntimeError("TikTok API rejected request; check creator permissions and account")
+    if not isinstance(result.get("data"), dict):
+        raise RuntimeError("TikTok API did not return a data object")
     return result["data"]
 
 
@@ -321,47 +333,99 @@ def tiktok_status(publish_id: str) -> tuple[str, str]:
     if state == "PUBLISH_COMPLETE":
         return "published", publish_id
     if state == "FAILED":
-        return "failed", f"{publish_id} | {data.get('fail_reason', 'unspecified')}"
+        return "failed", "TikTok reported a failed publication; inspect the task in the creator account"
     return "submitted", publish_id
 
 
-def tiktok_api_publish(video: Path, caption: dict, metadata: dict) -> tuple[str, str]:
-    """Designed for a reviewed client with creator UI, explicit consent per post."""
-    if metadata.get("tiktok_consent") is not True:
-        raise PreflightError("TikTok requires explicit consent per post; set tiktok_consent in the .json sidecar after review")
+def tiktok_direct_review(video: Path, metadata: dict) -> dict:
+    """Local validation only. A real reviewed app must collect these values via its consent UX."""
+    from tiktok_outbox import digest
+
+    if os.getenv("ENABLE_LIVE_POSTING", "false").lower() != "true":
+        raise PreflightError("Live posting is disabled")
     if os.getenv("TIKTOK_APP_APPROVED", "false").lower() != "true":
-        raise PreflightError("Direct Post public requires an approved/audited TikTok developer app")
-    info = _tiktok_json("/v2/post/publish/creator_info/query/", {})
+        raise PreflightError("Direct Post requires an eligible, actually reviewed/audited TikTok app")
+    if metadata.get("tiktok_consent") is not True:
+        raise PreflightError("Explicit per-video Direct Post consent is missing")
+    title = metadata.get("tiktok_reviewed_caption")
+    creator = metadata.get("tiktok_creator_username")
     privacy = metadata.get("tiktok_privacy_level")
-    if not privacy or privacy not in info.get("privacy_level_options", []):
-        raise PreflightError("Select a privacy level offered by TikTok creator_info in the .json sidecar")
-    if info.get("max_video_post_duration_sec", 0) < metadata.get("duration_seconds", 0):
+    if not isinstance(title, str) or not title.strip() or len(title) > 2200:
+        raise PreflightError("Review and approve the exact TikTok caption before publishing")
+    if not isinstance(creator, str) or not creator.strip().lstrip("@"):
+        raise PreflightError("Review and select the exact TikTok creator account")
+    if privacy not in {"PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY"}:
+        raise PreflightError("Select an explicit TikTok privacy option; no default is applied")
+    if not video.is_file() or video.suffix.lower() != ".mp4" or video.stat().st_size <= 0:
+        raise PreflightError("TikTok requires a nonempty reviewed MP4")
+    if metadata.get("tiktok_reviewed_sha256") != digest(video):
+        raise PreflightError("The TikTok file differs from the reviewed video; review again")
+    flags = ("disable_comment", "disable_duet", "disable_stitch", "brand_content_toggle",
+             "brand_organic_toggle", "is_aigc")
+    if any(type(metadata.get(k)) is not bool for k in flags):
+        raise PreflightError("Review and explicitly specify all TikTok interaction, commercial and AI disclosure flags")
+    if metadata["brand_content_toggle"] and privacy == "SELF_ONLY":
+        raise PreflightError("Branded content cannot use private visibility")
+    duration = metadata.get("duration_seconds")
+    if not isinstance(duration, (int, float)) or not 4 <= duration <= 60:
+        raise PreflightError("Direct Post is restricted to this workflow's 4–60s highlights")
+    return {"title": title, "privacy_level": privacy, **{k: metadata[k] for k in flags}}
+
+
+def tiktok_api_publish(video: Path, caption: dict, metadata: dict, save_publish_id=None) -> tuple[str, str]:
+    """Eligible reviewed app only: persist publish ID before sending any media bytes."""
+    from urllib.parse import urlsplit
+    from tiktok_oauth import access_token
+
+    post_info = tiktok_direct_review(video, metadata)
+    # Validate/refresh token before a post is initialized. Never create an extra init on retry.
+    access_token()
+    info = _tiktok_json("/v2/post/publish/creator_info/query/", {})
+    creator = info.get("creator_username")
+    if not isinstance(creator, str) or creator.lstrip("@").casefold() != metadata["tiktok_creator_username"].strip().lstrip("@").casefold():
+        raise PreflightError("TikTok creator differs from the reviewed account")
+    if post_info["privacy_level"] not in info.get("privacy_level_options", []):
+        raise PreflightError("Reviewed privacy is unavailable for this TikTok creator")
+    if info.get("max_video_post_duration_sec", 0) < metadata["duration_seconds"]:
         raise PreflightError("Video longer than TikTok creator's allowed maximum")
+    for flag, field in (("disable_comment", "comment_disabled"), ("disable_duet", "duet_disabled"),
+                        ("disable_stitch", "stitch_disabled")):
+        if info.get(field) is True and not post_info[flag]:
+            raise PreflightError("Creator interaction permissions changed; review the video again")
     size = video.stat().st_size
-    # The last chunk may include a remainder (up to 128 MB).
     chunk = min(10_000_000, size)
     count = max(1, size // chunk)
+    if count > 1000:
+        raise PreflightError("TikTok video exceeds this upload plan's chunk count limit")
     initialized = _tiktok_json("/v2/post/publish/video/init/", {
-        "post_info": {
-            "title": caption["tiktok"][:2200], "privacy_level": privacy,
-            "disable_comment": bool(metadata.get("disable_comment", False)),
-            "disable_duet": bool(metadata.get("disable_duet", False)),
-            "disable_stitch": bool(metadata.get("disable_stitch", False)),
-            "brand_content_toggle": bool(metadata.get("brand_content_toggle", False)),
-            "brand_organic_toggle": bool(metadata.get("brand_organic_toggle", False)),
-            "is_aigc": bool(metadata.get("is_aigc", False)),
-        },
+        "post_info": post_info,
         "source_info": {"source": "FILE_UPLOAD", "video_size": size, "chunk_size": chunk, "total_chunk_count": count},
     })
-    upload_url, publish_id = initialized["upload_url"], initialized["publish_id"]
+    upload_url, publish_id = initialized.get("upload_url"), initialized.get("publish_id")
+    if not isinstance(publish_id, str) or not publish_id.strip():
+        raise RuntimeError("TikTok initialization returned no publish ID; reconcile manually")
+    if save_publish_id is not None:
+        save_publish_id(publish_id)
+    if not isinstance(upload_url, str):
+        raise RuntimeError("TikTok initialization returned no upload URL")
+    parsed = urlsplit(upload_url)
+    if parsed.scheme != "https" or not (parsed.hostname or "").endswith(".tiktokapis.com") or parsed.username or parsed.password:
+        raise RuntimeError("TikTok returned an unexpected media-upload host; stop")
     with video.open("rb") as handle:
         for index in range(count):
             start = handle.tell()
             length = chunk if index < count - 1 else size - start
             payload = handle.read(length)
-            response = requests.put(upload_url, headers={
-                "Content-Type": "video/mp4", "Content-Length": str(len(payload)),
-                "Content-Range": f"bytes {start}-{start + len(payload) - 1}/{size}",
-            }, data=payload, timeout=(15, 300))
-            response.raise_for_status()
+            if len(payload) != length:
+                raise RuntimeError("TikTok source file changed during transfer")
+            try:
+                response = requests.put(upload_url, headers={
+                    "Content-Type": "video/mp4", "Content-Length": str(len(payload)),
+                    "Content-Range": f"bytes {start}-{start + len(payload) - 1}/{size}",
+                }, data=payload, timeout=(15, 300), allow_redirects=False)
+                if response.status_code != (201 if index == count - 1 else 206):
+                    raise RuntimeError("Unexpected TikTok media transfer result; reconcile publish ID")
+            except requests.RequestException as exc:
+                # Never include the signed upload URL in logs/Telegram.
+                raise RuntimeError("TikTok media transfer interrupted; reconcile publish ID before retry") from exc
     return "submitted", publish_id

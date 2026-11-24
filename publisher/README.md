@@ -196,39 +196,56 @@ Official guidelines: https://developers.tiktok.com/docs/en/content-sharing-guide
 
 
 
-### Mode 1: Official Direct Post API (only if your case qualifies)
+### Mode 1: Official Direct Post API (eligible reviewed apps only)
 
-TikTok Direct Post needs an approved app, `video.publish`, a TikTok OAuth user token, and a user-compliant UX (account identity, preview, privacy selection, interaction settings, disclosure, express consent). This command-line MVP is **not a ready-to-submit compliant TikTok developer app**. Don't enable it solely to bypass TikTok's review process.
+Direct Post is the preferred integration for eligible creator-facing apps, not a workaround for the personal/internal utility restriction. This Python backend is not a complete Login Kit/creator consent UI or a guarantee of TikTok approval. Do not misrepresent the use case during review. Keep TikTok disabled until eligibility, approved scope `video.publish`, compliant preview/consent UX and public-post audit have been confirmed.
 
-For a qualified app/integration, set:
+1. Register the actual app/use case in TikTok for Developers, add Login Kit and Content Posting API / Direct Post, and configure the registered redirect URI.
+2. Use the approved app's authorization-code flow to obtain an OAuth **user** token response (access and refresh tokens, scope, open ID and expiry fields). Do not use a client-credentials token. This repo does not yet implement the browser Login Kit callback or PKCE/state flow. Do not paste tokens into chat or GitHub. Keep the temporary response JSON private, outside the repository, and delete it after importing.
+3. Set the local `.env` values, then import the response through stdin:
 
-```ini
-TIKTOK_MODE=api
-TIKTOK_APP_APPROVED=true
-TIKTOK_ACCESS_TOKEN=...
+```bash
+python tiktok_oauth.py import-response < /private/path/tiktok-oauth-response.json
+python publisher.py doctor
 ```
 
-For each video, the publisher expects a reviewed, manually supplied sidecar:
+```ini
+# Enable only after the actual app qualifies and has been approved/audited.
+TIKTOK_MODE=api
+TIKTOK_APP_APPROVED=false
+TIKTOK_TOKEN_FILE=state/tiktok_token.json
+TIKTOK_CLIENT_KEY=
+TIKTOK_CLIENT_SECRET=
+```
+
+The token file is stored with owner-only permissions. Expiry is calculated from the returned lifetime and the token is refreshed before it expires. A rotated refresh token replaces the previous value; a changed account or missing scope blocks publication. A legacy `TIKTOK_ACCESS_TOKEN` is supported but does not refresh automatically.
+
+4. A compliant reviewed UI must show the video and current Creator Info, allow the creator to edit/select caption, privacy, interaction settings and relevant disclosures, and obtain explicit consent for that exact post. Its output must bind approval to the exact file SHA256, account and reviewed caption. Example sidecar schema (illustrative values only; never auto-generate consent or select privacy on the creator's behalf):
 
 ```json
 {
-  "tiktok_consent": true,
-  "tiktok_privacy_level": "PUBLIC_TO_EVERYONE",
-  "disable_comment": false,
-  "disable_duet": false,
-  "disable_stitch": false,
-  "is_aigc": false,
+  "tiktok_consent": false,
+  "tiktok_creator_username": "reviewed_creator",
+  "tiktok_reviewed_sha256": "replace_with_sha256_of_reviewed_mp4",
+  "tiktok_reviewed_caption": "caption approved by creator",
+  "tiktok_privacy_level": "SELF_ONLY",
+  "disable_comment": true,
+  "disable_duet": true,
+  "disable_stitch": true,
+  "is_aigc": true,
   "brand_content_toggle": false,
   "brand_organic_toggle": false
 }
 ```
 
-The program queries TikTok creator info, checks allowed privacy/duration, initializes `FILE_UPLOAD`, uploads the video in sequential HTTP chunks, and polls posting status on later scheduler ticks. OAuth token refresh is **not yet implemented**; replace expired tokens through your app's standard OAuth lifecycle.
+The sidecar is only the backend's consent record contract, not a substitute for the UI required by TikTok. When all legitimate prerequisites are satisfied, select `PLATFORMS=facebook,youtube,tiktok` and enable live publishing. TikTok stays highlight-only. The publisher refreshes user OAuth, rechecks the creator identity/privacy/duration and restrictions, saves the publish ID immediately after init, validates each sequential upload response, and polls status for submitted or uncertain tasks with a known publish ID. An uncertain task is never blindly reinitialized. `published` means TikTok reported PUBLISH_COMPLETE, not proof of public visibility. For unaudited apps TikTok restricts visibility; this backend conservatively blocks Direct Post until actual audit.
 
 Official references:
-- https://developers.tiktok.com/docs/en/content-posting-api-get-started
 - https://developers.tiktok.com/docs/en/content-sharing-guidelines
 - https://developers.tiktok.com/docs/en/content-posting-api-reference-direct-post
+- https://developers.tiktok.com/docs/en/content-posting-api-media-transfer-guide
+- https://developers.tiktok.com/docs/en/oauth-user-access-token-management
+- https://developers.tiktok.com/docs/en/content-posting-api-reference-get-video-status
 
 ### Legacy Android ADB prototype (diagnostics only)
 

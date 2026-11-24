@@ -517,12 +517,10 @@ def publish_pending(con: sqlite3.Connection, kind: str | None = None):
                 if p["kind"] != "short":
                     raise backends.PreflightError("TikTok is restricted to the highlight stream")
                 if mode == "api":
-                    backends.required("TIKTOK_ACCESS_TOKEN")
-                    if metadata.get("tiktok_consent") is not True:
-                        raise backends.PreflightError("No explicit per-video TikTok approval (.json sidecar)")
-                    if os.getenv("TIKTOK_APP_APPROVED", "false").lower() != "true":
-                        raise backends.PreflightError("TikTok app not audited/approved")
-                    callback = lambda: backends.tiktok_api_publish(path, caption, metadata)
+                    backends.tiktok_direct_review(path, metadata)
+                    callback = lambda: backends.tiktok_api_publish(
+                        path, caption, metadata,
+                        lambda publish_id: post_update(con, p["dispatch_id"], "tiktok", "inflight", remote_id=publish_id))
                 elif mode == "manual":
                     if p["kind"] != "short":
                         raise backends.PreflightError("TikTok review is restricted to highlights")
@@ -545,6 +543,10 @@ def publish_pending(con: sqlite3.Connection, kind: str | None = None):
             send_notice(f"{platform}: {status} | {path.name} | remote={remote}")
         except Exception as exc:
             message = redact_error(exc)
+            if platform == "tiktok" and not manual_tiktok and isinstance(exc, backends.PreflightError):
+                # All Direct Post preflight checks occur before the remote init request.
+                post_update(con, p["dispatch_id"], platform, "blocked", error=message)
+                continue
             if manual_tiktok:
                 # Local-only package creation is idempotent. Never classify it as a remote upload.
                 post_update(con, p["dispatch_id"], platform, "preparing_manual", error=message)
@@ -616,7 +618,7 @@ def reconcile(con: sqlite3.Connection):
 
     if os.getenv("TIKTOK_MODE", "off") != "api":
         return
-    rows = con.execute("SELECT * FROM posts WHERE platform='tiktok' AND status='submitted' AND remote_id IS NOT NULL").fetchall()
+    rows = con.execute("SELECT * FROM posts WHERE platform='tiktok' AND status IN ('submitted','needs_check') AND remote_id IS NOT NULL").fetchall()
     for item in rows:
         try:
             state, outcome = backends.tiktok_status(item["remote_id"])
