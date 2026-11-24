@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import tiktok_outbox as outbox
+import publisher
 from backends import PreflightError
 
 
@@ -72,6 +73,32 @@ class TikTokOutboxTests(unittest.TestCase):
             with self.assertRaises(PreflightError):
                 outbox.confirm(con, 1, "https://www.tiktok.com/@x/video/999")
             self.assertEqual(con.execute("SELECT status FROM posts WHERE dispatch_id=2").fetchone()[0], "awaiting_manual")
+
+
+    def test_interrupted_manual_job_recovers_without_network(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            video.write_bytes(b"clip")
+            fingerprint = hashlib.sha256(b"clip").hexdigest()
+            with patch.object(publisher, "DATABASE", root / "test.sqlite3"), \
+                    patch.dict("os.environ", {"TIKTOK_MODE": "manual", "TIKTOK_OUTBOX_DIR": str(root / "out")}), \
+                    patch.object(publisher, "send_notice"), \
+                    patch("backends.tiktok_api_publish", side_effect=AssertionError("unexpected API call")):
+                with publisher.db() as con:
+                    con.execute("INSERT INTO videos(fingerprint,path,title_hint,created_at,kind,file_size) VALUES (?,?,?,?,?,?)",
+                                (fingerprint, str(video), "clip", "now", "short", 4))
+                    con.execute("INSERT INTO dispatches(slot_key,video_id,day,caption_json,metadata_json,created_at) VALUES (?,?,?,?,?,?)",
+                                ("slot", 1, "today", '{"tiktok":"caption"}', '{"duration_seconds":10}', "now"))
+                    con.execute("INSERT INTO posts(dispatch_id,platform,status,updated_at) VALUES (1,'tiktok','preparing_manual','now')")
+                    con.commit()
+                    publisher.quarantine_interrupted_uploads(con)
+                    publisher.publish_pending(con, "short")
+                    row = con.execute("SELECT status,remote_id FROM posts").fetchone()
+                    self.assertEqual(row["status"], "awaiting_manual")
+                    self.assertTrue(Path(row["remote_id"], "video.mp4").is_file())
+                    publisher.publish_pending(con, "short")
+                    self.assertEqual(len(list((root / "out").iterdir())), 1)
 
 
 if __name__ == "__main__":

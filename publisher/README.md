@@ -230,20 +230,11 @@ Official references:
 - https://developers.tiktok.com/docs/en/content-sharing-guidelines
 - https://developers.tiktok.com/docs/en/content-posting-api-reference-direct-post
 
-### Legacy Android ADB prototype (diagnostics only; live publishing disabled)
+### Legacy Android ADB prototype (diagnostics only)
 
-If you deliberately choose TikTok UI automation for your own device, test it thoroughly and respect TikTok account restrictions. No app-private data extraction or bypassing security challenges is included.
+The scheduler blocks `TIKTOK_MODE=adb`. The historical macro is kept in source for reference, not as a supported publishing workflow. `python publisher.py adb-inspect` can inspect a connected, unlocked test Android device and save a local screenshot; it does not publish. No security prompts should be bypassed.
 
-1. Connect and unlock the spare Android; enable USB debugging. Run `adb devices` and authorize the Mac on the phone.
-2. Sign into TikTok, set a consistent UI language and screen resolution, and ensure no popup is showing.
-3. Set `TIKTOK_MODE=adb` in `.env`, then run `python publisher.py adb-inspect`. The command saves `state/adb_screen.png` and prints visible UI text/element coordinates.
-4. Copy `tiktok_steps.example.json` to `tiktok_steps.json` and **calibrate all selectors and coordinates** for your TikTok version. The included file is deliberately incomplete and **has no final publication action**.
-5. A valid final macro must have an `assert_text` guard before a final `{"action":"publish_text","text":"Post"}` step. For a Vietnamese interface that may be `Đăng`. Test on a private/throwaway account before trusting it with public posts.
-6. Only after successful manual checks set `ADB_MACRO_APPROVED=true` in `.env`. ADB publication returns `submitted_unverified` because button taps cannot reliably confirm that a post is publicly visible.
-
-To enable manual review or an eligible API integration, change `PLATFORMS=facebook,youtube,tiktok`. ADB posting is disabled in the scheduler. The safe default excludes TikTok.
-
-Supported actions: `sleep`, `tap_text`, `tap_desc`, `tap_xy`, `set_text`, `assert_text`, `publish_text`. `set_text` supports `{caption}` interpolation. ADB pushes media to `/sdcard/Movies/AutoPublisher/`, opens TikTok, then plays the calibrated macro. If a selector is missing, the macro stops and saves a debug screenshot.
+Use `TIKTOK_MODE=manual` for personal accounts, or an eligible approved API client. The default `off` remains unchanged.
 
 ## Offline preflight before enabling automatic posting
 
@@ -307,6 +298,7 @@ Logs: `state/scheduler.log`, `state/scheduler_error.log`; database: `state/publi
 | `submitted` | API accepted | Check visibility/processing; TikTok API polled |
 | `published` | TikTok reports PUBLISH_COMPLETE | Done |
 | `submitted_unverified` | Legacy ADB macro ran | Check TikTok profile |
+| `preparing_manual` | Local package creation in progress or interrupted | Resume with manual mode; no remote upload occurred |
 | `awaiting_manual` | TikTok package prepared locally | Review and publish/schedule in Studio |
 | `published_manual` | Owner confirmed TikTok permalink | Not independently API verified |
 | `needs_check` | Uncertain after a remote call | Check platform; do not blindly retry |

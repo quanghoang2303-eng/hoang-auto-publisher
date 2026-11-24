@@ -472,11 +472,16 @@ def publish_pending(con: sqlite3.Connection, kind: str | None = None):
     rows = con.execute("""
         SELECT p.*,d.caption_json,d.metadata_json,v.path,v.fingerprint,v.kind FROM posts p
         JOIN dispatches d ON p.dispatch_id=d.id JOIN videos v ON d.video_id=v.id
-        WHERE p.status IN ('queued','blocked') AND (? IS NULL OR v.kind=?)
+        WHERE (p.status IN ('queued','blocked') OR (p.platform='tiktok' AND p.status='preparing_manual'))
+          AND (? IS NULL OR v.kind=?)
         ORDER BY p.dispatch_id,p.platform
     """, (kind, kind)).fetchall()
     for p in rows:
         platform, path = p["platform"], Path(p["path"])
+        manual_tiktok = platform == "tiktok" and os.getenv("TIKTOK_MODE", "off").lower() == "manual"
+        if p["status"] == "preparing_manual" and not manual_tiktok:
+            print("TikTok local package recovery paused: restore TIKTOK_MODE=manual")
+            continue
         caption, metadata = json.loads(p["caption_json"]), json.loads(p["metadata_json"])
         # User can supply consent/settings to a previously blocked TikTok job.
         try:
@@ -509,6 +514,8 @@ def publish_pending(con: sqlite3.Connection, kind: str | None = None):
                 callback = lambda: backends.youtube_publish(path, caption, kind=p["kind"], metadata=metadata)
             else:
                 mode = os.getenv("TIKTOK_MODE", "off").lower()
+                if p["kind"] != "short":
+                    raise backends.PreflightError("TikTok is restricted to the highlight stream")
                 if mode == "api":
                     backends.required("TIKTOK_ACCESS_TOKEN")
                     if metadata.get("tiktok_consent") is not True:
@@ -531,13 +538,18 @@ def publish_pending(con: sqlite3.Connection, kind: str | None = None):
             continue
         # Facebook Page Video transfer errors may resume a known checkpoint;
         # all other ambiguous remote failures remain manual to avoid duplicates.
-        post_update(con, p["dispatch_id"], platform, "inflight")
+        post_update(con, p["dispatch_id"], platform, "preparing_manual" if manual_tiktok else "inflight")
         try:
             status, remote = callback()
             post_update(con, p["dispatch_id"], platform, status, remote_id=remote)
             send_notice(f"{platform}: {status} | {path.name} | remote={remote}")
         except Exception as exc:
             message = redact_error(exc)
+            if manual_tiktok:
+                # Local-only package creation is idempotent. Never classify it as a remote upload.
+                post_update(con, p["dispatch_id"], platform, "preparing_manual", error=message)
+                print(f"TikTok local review package not ready: {message}")
+                continue
             # A known Page Videos session with an acknowledged checkpoint before EOF
             # can safely retry from that exact offset on the next scheduler tick.
             durable = con.execute("SELECT upload_session,upload_offset FROM posts "
