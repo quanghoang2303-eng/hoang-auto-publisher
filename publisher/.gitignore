@@ -1,0 +1,11 @@
+.env
+token.json
+client_secret.json
+state/
+__pycache__/
+*.pyc
+.DS_Store
+*.mp4
+*.mov
+*.mkv
+tiktok_token.json
