@@ -26,7 +26,6 @@ load_dotenv(BASE / ".env")
 import backends  # noqa: E402
 
 STATE = BASE / "state"
-STATE.mkdir(exist_ok=True)
 DATABASE = STATE / "publisher.sqlite3"
 LOCKFILE = STATE / "publisher.lock"
 TARGETS = ("facebook", "youtube", "tiktok")
@@ -60,6 +59,7 @@ def long_video_dir() -> Path | None:
 def exclusive_lock():
     import fcntl
 
+    LOCKFILE.parent.mkdir(parents=True, exist_ok=True)
     with LOCKFILE.open("a+b") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
@@ -73,6 +73,7 @@ def db() -> sqlite3.Connection:
             finally:
                 self.close()
 
+    DATABASE.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DATABASE, factory=ClosingConnection)
     con.row_factory = sqlite3.Row
     con.executescript("""
